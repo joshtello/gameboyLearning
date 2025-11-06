@@ -1,0 +1,32 @@
+# Build artifacts
+*.exe
+*.o
+*.obj
+*.a
+*.dll
+*.so
+*.dylib
+
+# ROM files (test ROMs - you may want to include these)
+# *.gb
+# *.gbc
+
+# IDE files
+.vs/
+.vscode/
+*.user
+*.suo
+*.sln
+*.vcxproj
+*.vcxproj.filters
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# OS files
+.DS_Store
+Thumbs.db
+
