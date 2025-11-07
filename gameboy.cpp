@@ -665,7 +665,6 @@ public:
                     setFlag(FLAG_C, newValue > 0xFF);
                     return 4; 
                 }
-
             // TODO: Implement remaining ~495 opcodes!
             // Reference: https://gbdev.io/pandocs/CPU_Instruction_Set.html
             
