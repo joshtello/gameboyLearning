@@ -665,6 +665,143 @@ public:
                     setFlag(FLAG_C, newValue > 0xFF);
                     return 4; 
                 }
+            case 0xC9: // RET
+                {
+                    uint8_t low = memory->read(regs.sp++);
+                    uint8_t high = memory->read(regs.sp++);
+                    regs.pc = (high << 8) | low;
+                    return 16;
+                }
+            case 0xCD: // CALL nn
+                {
+                    uint16_t addr = memory->read(regs.pc++);
+                    addr |= memory->read(regs.pc++) << 8;
+                    
+                    // Push current PC onto stack
+                    memory->write(--regs.sp, regs.pc >> 8);    // High byte
+                    memory->write(--regs.sp, regs.pc & 0xFF);  // Low byte
+                    
+                    // Jump to address
+                    regs.pc = addr;
+                    
+                    return 24;
+                }
+            case 0x18: //JR e
+                {
+                    int8_t offset = (int8_t)memory->read(regs.pc++);
+                    regs.pc += offset;
+                    return 12;
+                }
+            case 0x20: //JR NZ, e
+                {
+                    int8_t offset = (int8_t)memory->read(regs.pc++);
+                    if (!getFlag(FLAG_Z)) {
+                        regs.pc += offset;
+                        return 12;
+                    } else {
+                        return 8;
+                    }
+                }
+            case 0x28: //JR Z, e
+                {
+                    int8_t offset = (int8_t)memory->read(regs.pc++);
+                    if (getFlag(FLAG_Z)) {
+                        regs.pc += offset;
+                        return 12;
+                    } else {
+                        return 8;
+                    }
+                }
+            case 0x30: //JR NC, e
+                {
+                    int8_t offset = (int8_t)memory->read(regs.pc++);
+                    if (!getFlag(FLAG_C)) {
+                        regs.pc += offset;
+                        return 12;
+                    } else {
+                        return 8;
+                    }
+                }
+            case 0x38: //JR C, e
+                {
+                    int8_t offset = (int8_t)memory->read(regs.pc++);
+                    if (getFlag(FLAG_C)) {
+                        regs.pc += offset;
+                        return 12;
+                    } else {
+                        return 8;
+                    }
+                }
+            case 0xC2: // JP NZ, nn
+                {
+                    uint16_t addr = memory->read(regs.pc++);        // low byte
+                    addr |= (memory->read(regs.pc++) << 8);
+                    if (!getFlag(FLAG_Z)) {
+                        regs.pc = addr;
+                        return 16;
+                    } else {
+                        return 12;
+                    }
+                }
+            case 0xCA: // JP Z, nn
+                {
+                    uint16_t addr = memory->read(regs.pc++);        // low byte
+                    addr |= (memory->read(regs.pc++) << 8);
+                    if (getFlag(FLAG_Z)) {
+                        regs.pc = addr;
+                        return 16;
+                    } else {
+                        return 12;
+                    }
+                }
+            case 0xD2: // JP NC, nn
+                {
+                    uint16_t addr = memory->read(regs.pc++);        // low byte
+                    addr |= (memory->read(regs.pc++) << 8);
+                    if (!getFlag(FLAG_C)) {
+                        regs.pc = addr;
+                        return 16;
+                    } else {
+                        return 12;
+                    }
+                }
+            case 0xDA: // JP C, nn
+                {
+                    uint16_t addr = memory->read(regs.pc++);        // low byte
+                    addr |= (memory->read(regs.pc++) << 8);
+                    if (getFlag(FLAG_C)) {
+                        regs.pc = addr;
+                        return 16;
+                    } else {
+                        return 12;
+                    }
+                }
+            case 0x03: // INC BC
+                {
+                    uint16_t bc = getBC();
+                    bc++;
+                    setBC(bc);
+                    return 8;
+                }
+            case 0x13: // INC DE
+                {
+                    uint16_t de = getDE();
+                    de++;
+                    setDE(de);
+                    return 8;
+                }
+            case 0x23: // INC HL
+                {
+                    uint16_t hl = getHL();
+                    hl++;
+                    setHL(hl);
+                    return 8;
+                }
+            case 0x33: // INC SP
+                {
+                    regs.sp++;
+                    return 8;
+                }
             // TODO: Implement remaining ~495 opcodes!
             // Reference: https://gbdev.io/pandocs/CPU_Instruction_Set.html
             
