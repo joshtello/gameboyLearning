@@ -103,7 +103,9 @@ public:
     }
     
     void write(uint16_t addr, uint8_t value) {
-        // TODO: Implement memory mapping for writes
+        if (addr == 0xFF01) {
+            std::cout << (char)value << std::flush;
+        }
         
         if (addr < 0x8000) {
             // ROM - TODO: Handle MBC (Memory Bank Controller)
@@ -149,7 +151,8 @@ private:
     } regs;
     
     Memory* memory;
-    
+    bool ime; // Interrupt Master Enable
+
     // Flag helpers
     void setFlag(uint8_t flag, bool value) {
         if (value) regs.f |= flag;
@@ -183,6 +186,7 @@ public:
         regs.l = 0x4D;
         regs.sp = 0xFFFE;
         regs.pc = 0x0100;  // Start after boot ROM
+        ime = false;
     }
     
     int step() {
@@ -1443,7 +1447,6 @@ public:
                     regs.f = memory->read(regs.sp++);  // Loads F directly (all flags restored)
                     regs.a = memory->read(regs.sp++);  // Loads A
                     return 12;
-                    return 12;
                 }
             case 0xC5: // PUSH BC
                 {
@@ -1511,6 +1514,377 @@ public:
                     setFlag(FLAG_C, (oldA & 0x01) != 0);
                     return 4;
                 }
+            case 0x01: // LD BC, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    regs.c = low;
+                    regs.b = high;
+                    return 12;
+                }
+            case 0x11: // LD DE, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    regs.e = low;
+                    regs.d = high;
+                    return 12;
+                }
+            case 0x21: // LD HL, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    regs.l = low;
+                    regs.h = high;
+                    return 12;
+                }
+            case 0x31: // LD SP, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    regs.sp = (high << 8) | low;
+                    return 12;
+                }
+            case 0xC6: // ADD A, n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    uint8_t oldA = regs.a;
+                    uint16_t result = regs.a + value;
+                    regs.a += value;
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((oldA & 0x0F) + (value & 0x0F)) > 0x0F);
+                    setFlag(FLAG_C, result > 0xFF);
+                    return 8;
+                }
+            case 0xCE: // ADC A, n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                    uint8_t oldA = regs.a;
+                    uint16_t result = regs.a + value + carry;
+                    regs.a += value + carry;
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((oldA & 0x0F) + (value & 0x0F) + carry) > 0x0F);
+                    setFlag(FLAG_C, result > 0xFF);
+                    return 8;
+                }
+            case 0xD6: // SUB n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    uint8_t oldA = regs.a;
+                    uint16_t result = regs.a - value;
+                    regs.a -= value;
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_N, true);
+                    setFlag(FLAG_H, (oldA & 0x0F) < (value & 0x0F));
+                    setFlag(FLAG_C, oldA < value);
+                    return 8;
+                }
+            case 0xDE: // SBC A, n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                    uint8_t oldA = regs.a;
+                    uint16_t result = regs.a - value - carry;
+                    regs.a = regs.a - value - carry;
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_N, true);
+                    setFlag(FLAG_H, (oldA & 0x0F) < ((value & 0x0F) + carry));
+                    setFlag(FLAG_C, oldA < (value + carry));
+                    return 8;
+                }
+            case 0xE6: // AND n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    regs.a = regs.a & value;
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, true);
+                    setFlag(FLAG_C, false);
+                    return 8;
+                }
+            case 0xEE: // XOR n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    regs.a = regs.a ^ value;
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, false);
+                    setFlag(FLAG_C, false);
+                    return 8;
+                }
+            case 0xF6: // OR n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    regs.a = regs.a | value;
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, false);
+                    setFlag(FLAG_C, false);
+                    return 8;
+                }
+            case 0xFE: // CP n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    uint8_t oldA = regs.a;
+                    uint8_t result = regs.a - value;
+
+                    setFlag(FLAG_Z, result == 0);
+                    setFlag(FLAG_N, true);
+                    setFlag(FLAG_H, (oldA & 0x0F) < (value & 0x0F));
+                    setFlag(FLAG_C, oldA < value);
+                    return 8;
+                }
+            case 0xC7: // RST 00H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x00;
+                    return 16;
+                }
+            case 0xCF: // RST 08H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x08;
+                    return 16;
+                }
+            case 0xD7: // RST 10H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x10;
+                    return 16;
+                }
+            case 0xDF: // RST 18H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x18;
+                    return 16;
+                }
+            case 0xE7: // RST 20H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x20;
+                    return 16;
+                }
+            case 0xEF: // RST 28H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x28;
+                    return 16;
+                }
+            case 0xF7: // RST 30H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x30;
+                    return 16;
+                }
+            case 0xFF: // RST 38H
+                {
+                    memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                    memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                    regs.pc = 0x38;
+                    return 16;
+                }
+            case 0xF0:
+                { // LDH A, (n)
+                    uint8_t offset = memory->read(regs.pc++);
+                    regs.a = memory->read(0xFF00 + offset);
+                    return 12;
+                }
+            case 0xE0:
+                { // LDH (n), A
+                    uint8_t offset = memory->read(regs.pc++);
+                    memory->write(0xFF00 + offset, regs.a);
+                    return 12;
+                }
+            case 0xC0:
+                { // RET NZ
+                    if (!getFlag(FLAG_Z)) {
+                        uint8_t low = memory->read(regs.sp++);
+                        uint8_t high = memory->read(regs.sp++);
+                        regs.pc = (high << 8) | low;
+                        return 20;
+                    }
+                    return 8;
+                }
+            case 0xC8:
+                { // RET Z
+                    if (getFlag(FLAG_Z)) {
+                        uint8_t low = memory->read(regs.sp++);
+                        uint8_t high = memory->read(regs.sp++);
+                        regs.pc = (high << 8) | low;
+                        return 20;
+                    }
+                    return 8;
+                }
+            case 0xD0:
+                { // RET NC
+                    if (!getFlag(FLAG_C)) {
+                        uint8_t low = memory->read(regs.sp++);
+                        uint8_t high = memory->read(regs.sp++);
+                        regs.pc = (high << 8) | low;
+                        return 20;
+                    }
+                    return 8;
+                }
+            case 0xD8:
+                { // RET C
+                    if (getFlag(FLAG_C)) {
+                        uint8_t low = memory->read(regs.sp++);
+                        uint8_t high = memory->read(regs.sp++);
+                        regs.pc = (high << 8) | low;
+                        return 20;
+                    }
+                    return 8;
+                }
+            case 0xEA:
+                { // LD (nn), A
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    uint16_t addr = (high << 8) | low;
+                    memory->write(addr, regs.a);
+                    return 16;
+                }
+            case 0xFA:
+                { // LD A, (nn)
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    uint16_t addr = (high << 8) | low;
+                    regs.a = memory->read(addr);
+                    return 16;
+                }
+            case 0x26: // LD H, n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    regs.h = value;
+                    return 8;
+                }
+            case 0xC4: // CALL NZ, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    uint16_t addr = (high << 8) | low;
+                    if (!getFlag(FLAG_Z)) {
+                        memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                        memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                        regs.pc = addr;
+                        return 24;
+                    }
+                    return 12;
+                }
+            case 0xF3:
+                { // DI
+                    ime = false;
+                    return 4;
+                }
+            case 0xFB:
+                { // EI
+                    ime = true;
+                    return 4;
+                }
+            case 0x1E: // LD E, n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    regs.e = value;
+                    return 8;
+                }
+            case 0xE2:
+                { // LD (C), A
+                    memory->write(0xFF00 + regs.c, regs.a);
+                    return 8;
+                }
+            case 0xF2:
+                { // LD A, (C)
+                    regs.a = memory->read(0xFF00 + regs.c);
+                    return 8;
+                }
+            case 0x19: // ADD HL, DE
+                {
+                    uint16_t hl = getHL();
+                    uint16_t de = getDE();
+                    uint32_t result = hl + de;
+                    setHL(result & 0xFFFF);
+
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((hl & 0x0FFF) + (de & 0x0FFF)) > 0x0FFF);
+                    setFlag(FLAG_C, result > 0xFFFF);
+                    return 8;
+                }
+            case 0x35: // DEC (HL)
+                {
+                    uint16_t hL = getHL();
+                    uint8_t value = memory->read(hL);
+                    uint8_t result = value - 1;
+                    memory->write(hL, result);
+
+                    setFlag(FLAG_Z, result == 0);
+                    setFlag(FLAG_N, true);
+                    setFlag(FLAG_H, (value & 0x0F) == 0x00);
+                    return 12;
+                }
+            case 0xCB: // CB Prefix
+                {
+                    uint8_t cb_opcode = memory->read(regs.pc++);  // Read next byte
+                    return executeCB(cb_opcode);  // Handle CB instruction
+                }
+            case 0x29: // ADD HL, HL
+                {
+                    uint16_t hl = getHL();
+                    uint32_t result = hl + hl;
+                    setHL(result & 0xFFFF);
+
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((hl & 0x0FFF) + (hl & 0x0FFF)) > 0x0FFF);
+                    setFlag(FLAG_C, result > 0xFFFF);
+                    return 8;
+                }
+            case 0xE9:
+                { // JP (HL)
+                    regs.pc = getHL();
+                    return 4;
+                }
+            case 0xF8: // LD HL, SP+n
+                {
+                    int8_t offset = static_cast<int8_t>(memory->read(regs.pc++));
+                    uint16_t sp = regs.sp;
+                    uint16_t result = sp + offset;
+                    setHL(result & 0xFFFF);
+
+                    setFlag(FLAG_Z, false);
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((sp & 0x0F) + (offset & 0x0F)) > 0x0F);
+                    setFlag(FLAG_C, ((sp & 0xFF) + (offset & 0xFF)) > 0xFF);
+                    return 12;
+                }
+            case 0xF9: // LD SP, HL
+                {
+                    regs.sp = getHL();
+                    return 8;
+                }
+            case 0x08: // LD (nn), SP
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    uint16_t addr = (high << 8) | low;
+                    memory->write(addr, regs.sp & 0xFF);         // Low byte
+                    memory->write(addr + 1, (regs.sp >> 8) & 0xFF); // High byte
+                    return 20;
+                }
             // TODO: Implement remaining ~495 opcodes!
             // Reference: https://gbdev.io/pandocs/CPU_Instruction_Set.html
             
@@ -1519,6 +1893,689 @@ public:
                          << " at PC: 0x" << (regs.pc - 1) << std::endl;
                 return 4;
         }
+    }
+
+    int executeCB(uint8_t opcode) {
+    switch(opcode) {
+        case 0x00: // RLC B
+            {
+                uint8_t oldB = regs.b;
+                regs.b = (regs.b << 1) | (oldB >> 7);
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldB & 0x80);
+                return 8;
+            }
+        case 0x01: // RLC C
+            {
+                uint8_t oldC = regs.c;
+                regs.c = (regs.c << 1) | (oldC >> 7);
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldC & 0x80);
+                return 8;
+            }
+        case 0x02: // RLC D
+            {
+                uint8_t oldD = regs.d;
+                regs.d = (regs.d << 1) | (oldD >> 7);
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldD & 0x80);
+                return 8;
+            }
+        case 0x03: // RLC E
+            {
+                uint8_t oldE = regs.e;
+                regs.e = (regs.e << 1) | (oldE >> 7);
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldE & 0x80);
+                return 8;
+            }
+        case 0x04: // RLC H
+            {
+                uint8_t oldH = regs.h;
+                regs.h = (regs.h << 1) | (oldH >> 7);
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldH & 0x80);
+                return 8;
+            }
+        case 0x05: // RLC L
+            {
+                uint8_t oldL = regs.l;
+                regs.l = (regs.l << 1) | (oldL >> 7);
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldL & 0x80);
+                return 8;
+            }
+        case 0x06: // RLC (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t newValue = (oldValue << 1) | (oldValue >> 7);
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldValue & 0x80);
+                return 16;
+            }
+        case 0x07: // RLC A
+            {
+                uint8_t oldA = regs.a;
+                regs.a = (regs.a << 1) | (oldA >> 7);
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldA & 0x80);
+                return 8;
+            }   
+        case 0x08:    
+            { // RRC B
+                uint8_t oldB = regs.b;
+                regs.b = (regs.b >> 1) | (oldB << 7);
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldB & 0x01);
+                return 8;
+            }
+        case 0x09:    // RRC C
+            {
+                uint8_t oldC = regs.c;
+                regs.c = (regs.c >> 1) | (oldC << 7);
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldC & 0x01);
+                return 8;
+            }
+        case 0x0A:    // RRC D
+            {
+                uint8_t oldD = regs.d;
+                regs.d = (regs.d >> 1) | (oldD << 7);
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldD & 0x01);
+                return 8;
+            }
+        case 0x0B:    // RRC E
+            {
+                uint8_t oldE = regs.e;
+                regs.e = (regs.e >> 1) | (oldE << 7);
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldE & 0x01);
+                return 8;
+            }
+        case 0x0C:    // RRC H
+            {
+                uint8_t oldH = regs.h;
+                regs.h = (regs.h >> 1) | (oldH << 7);
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldH & 0x01);
+                return 8;
+            }
+        case 0x0D:    // RRC L
+            {
+                uint8_t oldL = regs.l;
+                regs.l = (regs.l >> 1) | (oldL << 7);
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldL & 0x01);
+                return 8;
+            }
+        case 0x0E:    // RRC (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t newValue = (oldValue >> 1) | (oldValue << 7);
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldValue & 0x01);
+                return 16;
+            }
+        case 0x0F:    // RRC A
+            {
+                uint8_t oldA = regs.a;
+                regs.a = (regs.a >> 1) | (oldA << 7);
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldA & 0x01);
+                return 8;
+            }
+        case 0x10:   // RL B
+            {
+                uint8_t oldB = regs.b;
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                regs.b = (regs.b << 1) | carry;
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldB & 0x80);
+                return 8;
+            }
+        case 0x11:   // RL C
+            {
+                uint8_t oldC = regs.c;
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                regs.c = (regs.c << 1) | carry;
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldC & 0x80);
+                return 8;
+            }
+        case 0x12:   // RL D
+            {
+                uint8_t oldD = regs.d;
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                regs.d = (regs.d << 1) | carry;
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldD & 0x80);
+                return 8;
+            }
+        case 0x13:   // RL E
+            {
+                uint8_t oldE = regs.e;
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                regs.e = (regs.e << 1) | carry;
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldE & 0x80);
+                return 8;
+            }
+        case 0x14:   // RL H
+            {
+                uint8_t oldH = regs.h;
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                regs.h = (regs.h << 1) | carry;
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldH & 0x80);
+                return 8;
+            }
+        case 0x15:   // RL L
+            {
+                uint8_t oldL = regs.l;
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                regs.l = (regs.l << 1) | carry;
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldL & 0x80);
+                return 8;
+            }
+        case 0x16:   // RL (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                uint8_t newValue = (oldValue << 1) | carry;
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldValue & 0x80);
+                return 16;
+            }
+        case 0x17:   // RL A
+            {
+                uint8_t oldA = regs.a;
+                uint8_t carry = getFlag(FLAG_C) ? 1 : 0;
+                regs.a = (regs.a << 1) | carry;
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldA & 0x80);
+                return 8;
+            }
+        case 0x18:  // RR B
+            {
+                uint8_t oldB = regs.b;
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                regs.b = (regs.b >> 1) | carry;
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldB & 0x01);
+                return 8;
+            }
+        case 0x19:  // RR C
+            {
+                uint8_t oldC = regs.c;
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                regs.c = (regs.c >> 1) | carry;
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldC & 0x01);
+                return 8;
+            }
+        case 0x1A:  // RR D
+            {
+                uint8_t oldD = regs.d;
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                regs.d = (regs.d >> 1) | carry;
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldD & 0x01);
+                return 8;
+            }
+        case 0x1B:  // RR E
+            {
+                uint8_t oldE = regs.e;
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                regs.e = (regs.e >> 1) | carry;
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldE & 0x01);
+                return 8;
+            }
+        case 0x1C:  // RR H
+            {
+                uint8_t oldH = regs.h;
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                regs.h = (regs.h >> 1) | carry;
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldH & 0x01);
+                return 8;
+            }
+        case 0x1D:  // RR L
+            {
+                uint8_t oldL = regs.l;
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                regs.l = (regs.l >> 1) | carry;
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldL & 0x01);
+                return 8;
+            }
+        case 0x1E:  // RR (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                uint8_t newValue = (oldValue >> 1) | carry;
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldValue & 0x01);
+                return 16;
+            }
+        case 0x1F:  // RR A
+            {
+                uint8_t oldA = regs.a;
+                uint8_t carry = getFlag(FLAG_C) ? 0x80 : 0;
+                regs.a = (regs.a >> 1) | carry;
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldA & 0x01);
+                return 8;
+            }
+        case 0x20: // SLA B
+            {
+                uint8_t oldB = regs.b;
+                regs.b = (regs.b << 1);
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldB & 0x80);
+                return 8;
+            }
+        case 0x21: // SLA C
+            {
+                uint8_t oldC = regs.c;
+                regs.c = (regs.c << 1);
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldC & 0x80);
+                return 8;
+            }
+        case 0x22: // SLA D
+            {
+                uint8_t oldD = regs.d;
+                regs.d = (regs.d << 1);
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldD & 0x80);
+                return 8;
+            }
+        case 0x23: // SLA E
+            {
+                uint8_t oldE = regs.e;
+                regs.e = (regs.e << 1);
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldE & 0x80);
+                return 8;
+            }
+        case 0x24: // SLA H
+            {
+                uint8_t oldH = regs.h;
+                regs.h = (regs.h << 1);
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldH & 0x80);
+                return 8;
+            }
+        case 0x25: // SLA L
+            {
+                uint8_t oldL = regs.l;
+                regs.l = (regs.l << 1);
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldL & 0x80);
+                return 8;
+            }
+        case 0x26: // SLA (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t newValue = (oldValue << 1);
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldValue & 0x80);
+                return 16;
+            }
+        case 0x27: // SLA A
+            {
+                uint8_t oldA = regs.a;
+                regs.a = (regs.a << 1);
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldA & 0x80);
+                return 8;
+            }
+        case 0x28: // SRA B
+            {
+                uint8_t oldB = regs.b;
+                regs.b = (regs.b >> 1) | (oldB & 0x80);
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldB & 0x01);
+                return 8;
+            }
+        case 0x29: // SRA C
+            {
+                uint8_t oldC = regs.c;
+                regs.c = (regs.c >> 1) | (oldC & 0x80);
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldC & 0x01);
+                return 8;
+            }
+        case 0x2A: // SRA D
+            {
+                uint8_t oldD = regs.d;
+                regs.d = (regs.d >> 1) | (oldD & 0x80);
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldD & 0x01);
+                return 8;
+            }
+        case 0x2B: // SRA E
+            {
+                uint8_t oldE = regs.e;
+                regs.e = (regs.e >> 1) | (oldE & 0x80);
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldE & 0x01);
+                return 8;
+            }
+        case 0x2C: // SRA H
+            {
+                uint8_t oldH = regs.h;
+                regs.h = (regs.h >> 1) | (oldH & 0x80);
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldH & 0x01);
+                return 8;
+            }
+        case 0x2D: // SRA L
+            {
+                uint8_t oldL = regs.l;
+                regs.l = (regs.l >> 1) | (oldL & 0x80);
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldL & 0x01);
+                return 8;
+            }
+        case 0x2E: // SRA (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t newValue = (oldValue >> 1) | (oldValue & 0x80);
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldValue & 0x01);
+                return 16;
+            }
+        case 0x2F: // SRA A
+            {
+                uint8_t oldA = regs.a;
+                regs.a = (regs.a >> 1) | (oldA & 0x80);
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldA & 0x01);
+                return 8;
+            }
+        case 0x30: // SWAP B
+            {
+                uint8_t oldB = regs.b;
+                regs.b = ((oldB & 0x0F) << 4) | ((oldB & 0xF0) >> 4);
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 8;
+            }
+        case 0x31: // SWAP C
+            {
+                uint8_t oldC = regs.c;
+                regs.c = ((oldC & 0x0F) << 4) | ((oldC & 0xF0) >> 4);
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 8;
+            }
+        case 0x32: // SWAP D
+            {
+                uint8_t oldD = regs.d;
+                regs.d = ((oldD & 0x0F) << 4) | ((oldD & 0xF0) >> 4);
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 8;
+            }
+        case 0x33: // SWAP E
+            {
+                uint8_t oldE = regs.e;
+                regs.e = ((oldE & 0x0F) << 4) | ((oldE & 0xF0) >> 4);
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 8;
+            }
+        case 0x34: // SWAP H
+            {
+                uint8_t oldH = regs.h;
+                regs.h = ((oldH & 0x0F) << 4) | ((oldH & 0xF0) >> 4);
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 8;
+            }
+        case 0x35: // SWAP L
+            {
+                uint8_t oldL = regs.l;
+                regs.l = ((oldL & 0x0F) << 4) | ((oldL & 0xF0) >> 4);
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 8;
+            }
+        case 0x36: // SWAP (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t newValue = ((oldValue & 0x0F) << 4) | ((oldValue & 0xF0) >> 4);
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 16;
+            }
+        case 0x37: // SWAP A
+            {
+                uint8_t oldA = regs.a;
+                regs.a = ((oldA & 0x0F) << 4) | ((oldA & 0xF0) >> 4);
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, false);
+                return 8;
+            }
+        case 0x38: // SRL B
+            {
+                uint8_t oldB = regs.b;
+                regs.b = (regs.b >> 1);
+                setFlag(FLAG_Z, regs.b == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldB & 0x01);
+                return 8;
+            }
+        case 0x39: // SRL C
+            {
+                uint8_t oldC = regs.c;
+                regs.c = (regs.c >> 1);
+                setFlag(FLAG_Z, regs.c == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldC & 0x01);
+                return 8;
+            }
+        case 0x3A: // SRL D
+            {
+                uint8_t oldD = regs.d;
+                regs.d = (regs.d >> 1);
+                setFlag(FLAG_Z, regs.d == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldD & 0x01);
+                return 8;
+            }
+        case 0x3B: // SRL E
+            {
+                uint8_t oldE = regs.e;
+                regs.e = (regs.e >> 1);
+                setFlag(FLAG_Z, regs.e == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldE & 0x01);
+                return 8;
+            }
+        case 0x3C: // SRL H
+            {
+                uint8_t oldH = regs.h;
+                regs.h = (regs.h >> 1);
+                setFlag(FLAG_Z, regs.h == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldH & 0x01);
+                return 8;
+            }
+        case 0x3D: // SRL L
+            {
+                uint8_t oldL = regs.l;
+                regs.l = (regs.l >> 1);
+                setFlag(FLAG_Z, regs.l == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldL & 0x01);
+                return 8;
+            }
+        case 0x3E: // SRL (HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t oldValue = memory->read(hL);
+                uint8_t newValue = (oldValue >> 1);
+                memory->write(hL, newValue);
+                setFlag(FLAG_Z, newValue == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldValue & 0x01);
+                return 16;
+            }
+        case 0x3F: // SRL A
+            {
+                uint8_t oldA = regs.a;
+                regs.a = (regs.a >> 1);
+                setFlag(FLAG_Z, regs.a == 0);
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, false);
+                setFlag(FLAG_C, oldA & 0x01);
+                return 8;
+            }
+        
+        
+        // ... 256 cases total
+        default:
+            std::cout << "Unknown CB opcode: 0x" << std::hex << (int)opcode 
+                     << " at PC: 0x" << (regs.pc - 1) << std::endl;
+            return 4;}
     }
     
     // Helper to get 16-bit register pairs
