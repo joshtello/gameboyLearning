@@ -36,6 +36,8 @@ private:
     std::array<uint8_t, 0x80> io;       // I/O registers
     
     uint8_t ie_register;                // Interrupt Enable
+    uint8_t joypad_buttons;    // Buttons: START, SELECT, B, A
+    uint8_t joypad_directions; // Directions: DOWN, UP, LEFT, RIGHT
 
 public:
     Memory() {
@@ -45,6 +47,8 @@ public:
         hram.fill(0);
         io.fill(0);
         ie_register = 0;
+        joypad_buttons = 0x0F;    // All released (1 = not pressed)
+        joypad_directions = 0x0F; // All released
     }
     
     bool loadROM(const std::string& filename) {
@@ -63,6 +67,10 @@ public:
         
         std::cout << "Loaded ROM: " << filename << " (" << size << " bytes)" << std::endl;
         return true;
+    }
+
+    void incrementDIV() {
+        io[0x04] = (io[0x04] + 1) & 0xFF;
     }
     
     uint8_t read(uint16_t addr) {
@@ -87,8 +95,23 @@ public:
             return oam[addr - 0xFE00];
         }
         else if (addr >= 0xFF00 && addr < 0xFF80) {
-            // I/O Registers - TODO: Implement proper I/O handling
-            return io[addr - 0xFF00];
+                // I/O Registers
+            if (addr == 0xFF00) {
+    uint8_t p1 = io[0x00];  // Now this will be 0x10 (not 0xD0)
+    uint8_t result = p1 | 0xC0;  // Set bits 6-7: 0x10 | 0xC0 = 0xD0
+    
+    if (!(p1 & 0x20)) {  // Check bit 5 - button select
+        result = (result & 0xF0) | (joypad_buttons & 0x0F);
+    } 
+    
+    if (!(p1 & 0x10)) {  // ✅ Now this works! 0x10 & 0x10 = 0, so !0 = true
+        result = (result & 0xF0) | (joypad_directions & 0x0F);
+    }
+    
+    return result;
+
+}
+return io[addr - 0xFF00];
         }
         else if (addr >= 0xFF80 && addr < 0xFFFF) {
             // High RAM
@@ -104,7 +127,58 @@ public:
     
     void write(uint16_t addr, uint8_t value) {
         if (addr == 0xFF01) {
-            std::cout << (char)value << std::flush;
+            static std::ofstream logfile("serial_log.txt");
+            static std::string buffer;
+            
+            char c = (char)value;
+            std::cout << c << std::flush;
+            
+            // Log with hex values
+            logfile << "Char: '" << c << "' (0x" << std::hex << (int)(uint8_t)value << ")" << std::dec << std::endl;
+            
+            buffer += c;
+            
+            // Check for common Blargg test completion patterns
+            if (buffer.find("Passed") != std::string::npos && 
+                buffer.find("\n\n") != std::string::npos) {
+                std::cout << "\n\n=== TEST PASSED ===" << std::endl;
+                logfile << "\n=== TEST PASSED ===" << std::endl;
+                logfile << "Full buffer: " << buffer << std::endl;
+                logfile.close();
+                exit(0);
+            }
+            
+            if (buffer.find("Failed") != std::string::npos) {
+                std::cout << "\n\n=== TEST FAILED ===" << std::endl;
+                logfile << "\n=== TEST FAILED ===" << std::endl;
+                logfile << "Full buffer: " << buffer << std::endl;
+                logfile.close();
+                exit(1);
+            }
+            
+            // Keep buffer manageable
+            if (buffer.length() > 1000) {
+                buffer = buffer.substr(buffer.length() - 1000);
+            }
+        }
+        if (addr == 0xFF02) {
+            // Serial Control register
+            // Bit 7: Transfer Start Flag (0=No transfer, 1=Transfer in progress)
+            if (value & 0x80) {
+                // Transfer starts - we handle it immediately and clear bit 7
+                // In a real Game Boy, this takes ~8 clock cycles, but for emulation
+                // we can clear it immediately to allow the ROM to continue
+                io[0x02] = value & 0x7F;  // Clear bit 7 (transfer complete)
+            } else {
+                // Normal write for other values (like 0x01, 0x00, etc.)
+                io[0x02] = value;
+            }
+            return;
+        }
+        if (addr == 0xFF04){
+            // Writing to DIV resets it
+            io[0x04] = 0;
+            return;
         }
         
         if (addr < 0x8000) {
@@ -124,9 +198,17 @@ public:
             oam[addr - 0xFE00] = value;
         }
         else if (addr >= 0xFF00 && addr < 0xFF80) {
-            // I/O Registers - TODO: Implement proper I/O handling
-            io[addr - 0xFF00] = value;
-        }
+    // I/O Registers
+    if (addr == 0xFF00) {
+        // P1/JOYP - Only bits 4-5 are writable (button/direction select)
+        io[0x00] = (value & 0x30);
+    std::cout << "WRITE JOYPAD: value=0x" << std::hex << (int)value 
+              << " stored=0x" << (int)io[0x00] << std::dec << std::endl;
+    return;
+    }
+    
+    io[addr - 0xFF00] = value;
+}
         else if (addr >= 0xFF80 && addr < 0xFFFF) {
             // High RAM
             hram[addr - 0xFF80] = value;
@@ -135,7 +217,92 @@ public:
             // Interrupt Enable
             ie_register = value;
         }
+        
     }
+
+    // Button presses (bit 0 = pressed, 1 = not pressed)
+    void pressButton(int button) {
+        std::cout << "Memory::pressButton(" << (int)button << ") called" << std::endl;
+        std::cout << "Before: joypad_buttons = 0x" << std::hex << (int)joypad_buttons << std::dec << std::endl;
+        joypad_buttons &= ~(1 << button);
+        std::cout << "After: joypad_buttons = 0x" << std::hex << (int)joypad_buttons << std::dec << std::endl;
+    }
+
+    void releaseButton(int button) {
+        joypad_buttons |= (1 << button);
+    }
+
+    void pressDirection(int direction) {
+        joypad_directions &= ~(1 << direction);
+    }
+
+    void releaseDirection(int direction) {
+        joypad_directions |= (1 << direction);
+    }
+    
+    // Button/Direction constants
+    enum {
+        BTN_A = 0,
+        BTN_B = 1,
+        BTN_SELECT = 2,
+        BTN_START = 3,
+        DIR_RIGHT = 0,
+        DIR_LEFT = 1,
+        DIR_UP = 2,
+        DIR_DOWN = 3
+    };
+
+
+
+
+};
+
+class Timer {
+private:
+    Memory* memory;
+    int divider_counter;
+    int timer_counter;
+    
+public:
+    Timer(Memory* mem) : memory(mem), divider_counter(0), timer_counter(0) {}
+    
+    void step(int cycles) {
+    // Update DIV register (increments at 16384 Hz)
+    divider_counter += cycles;
+    if (divider_counter >= 256) {
+        divider_counter -= 256;
+        memory->incrementDIV();  // ✅ Bypass the reset handler
+    }
+    
+    // Check if timer is enabled
+    uint8_t tac = memory->read(0xFF07);
+    if (tac & 0x04) {
+        timer_counter += cycles;
+        
+        int frequency = 0;
+        switch (tac & 0x03) {
+            case 0: frequency = 1024; break;
+            case 1: frequency = 16;   break;
+            case 2: frequency = 64;   break;
+            case 3: frequency = 256;  break;
+        }
+        
+        if (timer_counter >= frequency) {
+            timer_counter -= frequency;
+            
+            uint8_t tima = memory->read(0xFF05);
+            if (tima == 0xFF) {
+                uint8_t tma = memory->read(0xFF06);
+                memory->write(0xFF05, tma);
+                
+                uint8_t if_flag = memory->read(0xFF0F);
+                memory->write(0xFF0F, if_flag | 0x04);
+            } else {
+                memory->write(0xFF05, tima + 1);
+            }
+        }
+    }
+}
 };
 
 class CPU {
@@ -152,11 +319,14 @@ private:
     
     Memory* memory;
     bool ime; // Interrupt Master Enable
+    bool halted;
+    bool ei_pending;
 
     // Flag helpers
     void setFlag(uint8_t flag, bool value) {
         if (value) regs.f |= flag;
         else regs.f &= ~flag;
+        regs.f &= 0xF0;  // ✅ Always mask lower 4 bits
     }
     
     bool getFlag(uint8_t flag) {
@@ -187,9 +357,59 @@ public:
         regs.sp = 0xFFFE;
         regs.pc = 0x0100;  // Start after boot ROM
         ime = false;
+        halted = false;
+        ei_pending = false;
     }
     
     int step() {
+    
+        
+        // ✅ Handle EI delayed enable FIRST
+        if (ei_pending) {
+            ime = true;
+            ei_pending = false;
+        }
+        
+        // Handle HALT
+        if (halted) {
+            uint8_t ie = memory->read(0xFFFF);
+            uint8_t if_flag = memory->read(0xFF0F);
+            if (ie & if_flag) {
+                halted = false;
+            } else {
+                return 4;
+            }
+        }
+        
+        // ✅ Handle interrupts (only if IME is enabled)
+        if (ime) {
+            uint8_t ie = memory->read(0xFFFF);
+            uint8_t if_flag = memory->read(0xFF0F);
+            uint8_t triggered = ie & if_flag;
+            
+            if (triggered) {
+                std::cout << "INTERRUPT! IE=0x" << std::hex << (int)ie 
+                  << " IF=0x" << (int)if_flag << std::dec << std::endl;
+                ime = false;  // Disable interrupts
+                
+                // Service highest priority interrupt
+                for (int i = 0; i < 5; i++) {
+                    if (triggered & (1 << i)) {
+                        // Clear the interrupt flag
+                        memory->write(0xFF0F, if_flag & ~(1 << i));
+                        
+                        // Push PC onto stack
+                        memory->write(--regs.sp, (regs.pc >> 8) & 0xFF);
+                        memory->write(--regs.sp, regs.pc & 0xFF);
+                        
+                        // Jump to interrupt vector
+                        regs.pc = 0x0040 + (i * 8);
+                        return 20;
+                    }
+                }
+            }
+        }
+    
         // Fetch opcode
         uint8_t opcode = memory->read(regs.pc++);
         
@@ -224,12 +444,9 @@ public:
                 {
                     uint8_t oldValue = regs.b;
                     regs.b++;
-
-                    // Update flags
                     setFlag(FLAG_Z, regs.b == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (oldValue & 0x0F) + 1 > 0x0F);
-
+                    setFlag(FLAG_H, (regs.b & 0x0F) == 0x00);  // ✅ More explicit
                     return 4;
                 }
             case 0x05: // DEC B
@@ -248,13 +465,11 @@ public:
                 { //INC C
                     uint8_t oldValue = regs.c;
                     regs.c++;
-
+                    
                     setFlag(FLAG_Z, regs.c == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (oldValue & 0x0F) + 1 > 0x0F);
-
+                    setFlag(FLAG_H, (regs.c & 0x0F) == 0x00);  
                     return 4;
-
                 }
             case 0x0D:
                 { //DEC C
@@ -275,7 +490,7 @@ public:
                     
                     setFlag(FLAG_Z, regs.d == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (oldValue & 0x0F) + 1 > 0x0F);  
+                    setFlag(FLAG_H, (regs.d & 0x0F) == 0x00);
                     return 4;
                 }
             case 0x15:
@@ -297,7 +512,7 @@ public:
                     
                     setFlag(FLAG_Z, regs.e == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (oldValue & 0x0F) + 1 > 0x0F);  
+                    setFlag(FLAG_H, (regs.e & 0x0F) == 0x00); 
                     return 4;
                 }
             case 0x1D:
@@ -319,7 +534,7 @@ public:
                     
                     setFlag(FLAG_Z, regs.h == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (oldValue & 0x0F) + 1 > 0x0F);  
+                    setFlag(FLAG_H, (regs.h & 0x0F) == 0x00);
                     return 4;
                 }
             case 0x25:
@@ -341,7 +556,7 @@ public:
                     
                     setFlag(FLAG_Z, regs.l == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (oldValue & 0x0F) + 1 > 0x0F);  
+                    setFlag(FLAG_H, (regs.l & 0x0F) == 0x00);
                     return 4;
                 }
             case 0x2D:
@@ -356,20 +571,17 @@ public:
                     return 4;
 
                 }
-            case 0x34:
-                {   //INC (HL)
-                    uint16_t addr = getHL();                    // Get address from HL
-                    uint8_t value = memory->read(addr);         // Read current value
-                    
-                    
-                    value++;  // Increment
+            case 0x34:  // INC (HL)
+                {
+                    uint16_t addr = getHL();
+                    uint8_t value = memory->read(addr);
+                    value++;
+                    memory->write(addr, value);
                     
                     setFlag(FLAG_Z, value == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (value & 0x0F) == 0x00);
-                    
-                    memory->write(addr, value);                 // Write back
-                    return 12;  // Takes 12 cycles
+                    setFlag(FLAG_H, (value & 0x0F) == 0x00);  
+                    return 12;
                 }
             case 0x3C:
             {
@@ -379,7 +591,7 @@ public:
                     
                     setFlag(FLAG_Z, regs.a == 0);
                     setFlag(FLAG_N, false);
-                    setFlag(FLAG_H, (oldValue & 0x0F) + 1 > 0x0F);  
+                    setFlag(FLAG_H, (regs.a & 0x0F) == 0x00);
                     return 4;          
             }
             case 0x3D:
@@ -1444,8 +1656,8 @@ public:
                 }
             case 0xF1: // POP AF
                 {
-                    regs.f = memory->read(regs.sp++);  // Loads F directly (all flags restored)
-                    regs.a = memory->read(regs.sp++);  // Loads A
+                    regs.f = memory->read(regs.sp++) & 0xF0;  // ✅ Mask lower 4 bits!
+                    regs.a = memory->read(regs.sp++);
                     return 12;
                 }
             case 0xC5: // PUSH BC
@@ -1468,8 +1680,8 @@ public:
                 }
             case 0xF5: // PUSH AF
                 {
-                    memory->write(--regs.sp, regs.a);  // A
-                    memory->write(--regs.sp, regs.f);  // F (all flags)
+                    memory->write(--regs.sp, regs.a);
+                    memory->write(--regs.sp, regs.f & 0xF0);  // ✅ Mask when pushing too
                     return 16;
                 }
             case 0x07: //RLCA
@@ -1794,7 +2006,7 @@ public:
                 }
             case 0xFB:
                 { // EI
-                    ime = true;
+                    ei_pending = true;
                     return 4;
                 }
             case 0x1E: // LD E, n
@@ -1829,12 +2041,12 @@ public:
                 {
                     uint16_t hL = getHL();
                     uint8_t value = memory->read(hL);
-                    uint8_t result = value - 1;
-                    memory->write(hL, result);
+                    value--;  // Decrement first
+                    memory->write(hL, value);
 
-                    setFlag(FLAG_Z, result == 0);
+                    setFlag(FLAG_Z, value == 0);
                     setFlag(FLAG_N, true);
-                    setFlag(FLAG_H, (value & 0x0F) == 0x00);
+                    setFlag(FLAG_H, (value & 0x0F) == 0x0F);  // ✅ After decrement, check if wrapped to 0x0F
                     return 12;
                 }
             case 0xCB: // CB Prefix
@@ -1885,12 +2097,173 @@ public:
                     memory->write(addr + 1, (regs.sp >> 8) & 0xFF); // High byte
                     return 20;
                 }
+            case 0x39: // ADD HL, SP
+                {
+                    uint16_t hl = getHL();
+                    uint16_t sp = regs.sp;
+                    uint32_t result = hl + sp;
+                    setHL(result & 0xFFFF);
+
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((hl & 0x0FFF) + (sp & 0x0FFF)) > 0x0FFF);
+                    setFlag(FLAG_C, result > 0xFFFF);
+                    return 8;
+                }
+            case 0x2E: // LD L, n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    regs.l = value;
+                    return 8;
+                }
+            case 0x10: // STOP
+                {
+                    regs.pc++;
+                    return 4;
+                }
+            case 0xE8:
+                { // ADD SP, n
+                    int8_t offset = static_cast<int8_t>(memory->read(regs.pc++));
+                    uint16_t sp = regs.sp;
+                    uint16_t result = sp + offset;
+                    regs.sp = result & 0xFFFF;
+
+                    setFlag(FLAG_Z, false);
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((sp & 0x0F) + (offset & 0x0F)) > 0x0F);
+                    setFlag(FLAG_C, ((sp & 0xFF) + (offset & 0xFF)) > 0xFF);
+                    return 16;
+                }
+            case 0x36: // LD (HL), n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    uint16_t hL = getHL();
+                    memory->write(hL, value);
+                    return 12;
+                }
+            case 0x16: // LD D, n
+                {
+                    uint8_t value = memory->read(regs.pc++);
+                    regs.d = value;
+                    return 8;
+                }
+            case 0x09: // ADD HL, BC
+                {
+                    uint16_t hl = getHL();
+                    uint16_t bc = getBC();
+                    uint32_t result = hl + bc;
+                    setHL(result & 0xFFFF);
+
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, ((hl & 0x0FFF) + (bc & 0x0FFF)) > 0x0FFF);
+                    setFlag(FLAG_C, result > 0xFFFF);
+                    return 8;
+                }
+            case 0x27: // DAA
+                {
+                    uint8_t correction = 0;
+                    bool setC = getFlag(FLAG_C);
+
+                    if (getFlag(FLAG_H) || (!getFlag(FLAG_N) && (regs.a & 0x0F) > 0x09)) {
+                        correction |= 0x06;
+                    }
+                    if (setC || (!getFlag(FLAG_N) && regs.a > 0x99)) {
+                        correction |= 0x60;
+                        setC = true;
+                    }
+
+                    if (getFlag(FLAG_N)) {
+                        regs.a -= correction;
+                    } else {
+                        regs.a += correction;
+                    }
+
+                    setFlag(FLAG_Z, regs.a == 0);
+                    setFlag(FLAG_H, false);
+                    setFlag(FLAG_C, setC);
+                    return 4;
+                }
+            case 0x2F: // CPL
+                {
+                    regs.a = ~regs.a;
+                    setFlag(FLAG_N, true);
+                    setFlag(FLAG_H, true);
+                    return 4;
+                }
+            case 0x37: // SCF
+                {
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, false);
+                    setFlag(FLAG_C, true);
+                    return 4;
+                }
+            case 0x3F: // CCF
+                {
+                    setFlag(FLAG_N, false);
+                    setFlag(FLAG_H, false);
+                    setFlag(FLAG_C, !getFlag(FLAG_C));
+                    return 4;
+                }
+            case 0x76: // HALT
+                {
+                    halted = true;
+                    return 4;
+                }
+            case 0xCC: // CALL Z, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    uint16_t addr = (high << 8) | low;
+                    if (getFlag(FLAG_Z)) {
+                        memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                        memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                        regs.pc = addr;
+                        return 24;
+                    }
+                    return 12;
+                }
+            case 0xD4: // CALL NC, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    uint16_t addr = (high << 8) | low;
+                    if (!getFlag(FLAG_C)) {
+                        memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                        memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                        regs.pc = addr;
+                        return 24;
+                    }
+                    return 12;
+                }
+            case 0xDC: // CALL C, nn
+                {
+                    uint8_t low = memory->read(regs.pc++);
+                    uint8_t high = memory->read(regs.pc++);
+                    uint16_t addr = (high << 8) | low;
+                    if (getFlag(FLAG_C)) {
+                        memory->write(--regs.sp, (regs.pc >> 8) & 0xFF); // Push high byte of PC
+                        memory->write(--regs.sp, regs.pc & 0xFF);        // Push low byte of PC
+                        regs.pc = addr;
+                        return 24;
+                    }
+                    return 12;
+                }
+            case 0xD9:
+                { // RETI
+                    uint8_t low = memory->read(regs.sp++);
+                    uint8_t high = memory->read(regs.sp++);
+                    regs.pc = (high << 8) | low;
+                    ime = true; // Enable interrupts after return
+                    return 16;
+                }
             // TODO: Implement remaining ~495 opcodes!
             // Reference: https://gbdev.io/pandocs/CPU_Instruction_Set.html
             
-            default:
+           default:
                 std::cout << "Unknown opcode: 0x" << std::hex << (int)opcode 
-                         << " at PC: 0x" << (regs.pc - 1) << std::endl;
+                        << " at PC: 0x" << (regs.pc - 1) << std::endl;
+                std::cout << "Registers - A:" << (int)regs.a << " F:" << (int)regs.f 
+                        << " B:" << (int)regs.b << " C:" << (int)regs.c << std::endl;
+                exit(1);  // Stop immediately
                 return 4;
         }
     }
@@ -2569,8 +2942,1158 @@ public:
                 setFlag(FLAG_C, oldA & 0x01);
                 return 8;
             }
-        
-        
+        case 0x40: // BIT 0,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x41: // BIT 0,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x42: // BIT 0,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x43: // BIT 0,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x44: // BIT 0,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x45: // BIT 0,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x46: // BIT 0,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x47: // BIT 0,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x01));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x48: // BIT 1,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x49: // BIT 1,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x4A: // BIT 1,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x4B: // BIT 1,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x4C: // BIT 1,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x4D: // BIT 1,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x4E: // BIT 1,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x4F: // BIT 1,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x02));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x50: // BIT 2,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x51: // BIT 2,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x52: // BIT 2,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x53: // BIT 2,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x54: // BIT 2,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x55: // BIT 2,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x56: // BIT 2,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x57: // BIT 2,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x04));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x58: // BIT 3,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x59: // BIT 3,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x5A: // BIT 3,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x5B: // BIT 3,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x5C: // BIT 3,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x5D: // BIT 3,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x5E: // BIT 3,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x5F: // BIT 3,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x08));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x60: // BIT 4,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x61: // BIT 4,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x62: // BIT 4,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x63: // BIT 4,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x64: // BIT 4,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x65: // BIT 4,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x66: // BIT 4,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x67: // BIT 4,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x10));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x68: // BIT 5,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x69: // BIT 5,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x6A: // BIT 5,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x6B: // BIT 5,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x6C: // BIT 5,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x6D: // BIT 5,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x6E: // BIT 5,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x6F: // BIT 5,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x20));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x70: // BIT 6,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x71: // BIT 6,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x72: // BIT 6,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x73: // BIT 6,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x74: // BIT 6,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x75: // BIT 6,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x76: // BIT 6,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x77: // BIT 6,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x40));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x78: // BIT 7,B
+            {
+                setFlag(FLAG_Z, !(regs.b & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x79: // BIT 7,C
+            {
+                setFlag(FLAG_Z, !(regs.c & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x7A: // BIT 7,D
+            {
+                setFlag(FLAG_Z, !(regs.d & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x7B: // BIT 7,E
+            {
+                setFlag(FLAG_Z, !(regs.e & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x7C: // BIT 7,H
+            {
+                setFlag(FLAG_Z, !(regs.h & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x7D: // BIT 7,L
+            {
+                setFlag(FLAG_Z, !(regs.l & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x7E: // BIT 7,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                setFlag(FLAG_Z, !(value & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 16;
+            }
+        case 0x7F: // BIT 7,A
+            {
+                setFlag(FLAG_Z, !(regs.a & 0x80));
+                setFlag(FLAG_N, false);
+                setFlag(FLAG_H, true);
+                return 8;
+            }
+        case 0x80: // RES 0,B
+            {
+                regs.b &= ~0x01;
+                return 8;
+            }
+        case 0x81: // RES 0,C
+            {
+                regs.c &= ~0x01;
+                return 8;
+            }
+        case 0x82: // RES 0,D
+            {
+                regs.d &= ~0x01;
+                return 8;
+            }
+        case 0x83: // RES 0,E
+            {
+                regs.e &= ~0x01;
+                return 8;
+            }
+        case 0x84: // RES 0,H
+            {
+                regs.h &= ~0x01;
+                return 8;
+            }
+        case 0x85: // RES 0,L
+            {
+                regs.l &= ~0x01;
+                return 8;
+            }
+        case 0x86: // RES 0,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x01;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0x87: // RES 0,A
+            {
+                regs.a &= ~0x01;
+                return 8;
+            }
+        case 0x88: // RES 1,B
+            {
+                regs.b &= ~0x02;
+                return 8;
+            }
+        case 0x89: // RES 1,C
+            {
+                regs.c &= ~0x02;
+                return 8;
+            }
+        case 0x8A: // RES 1,D
+            {
+                regs.d &= ~0x02;
+                return 8;
+            }
+        case 0x8B: // RES 1,E
+            {
+                regs.e &= ~0x02;
+                return 8;
+            }
+        case 0x8C: // RES 1,H
+            {
+                regs.h &= ~0x02;
+                return 8;
+            }
+        case 0x8D: // RES 1,L
+            {
+                regs.l &= ~0x02;
+                return 8;
+            }
+        case 0x8E: // RES 1,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x02;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0x8F: // RES 1,A
+            {
+                regs.a &= ~0x02;
+                return 8;
+            }
+        case 0x90: // RES 2,B
+            {
+                regs.b &= ~0x04;
+                return 8;
+            }
+        case 0x91: // RES 2,C
+            {
+                regs.c &= ~0x04;
+                return 8;
+            }
+        case 0x92: // RES 2,D
+            {
+                regs.d &= ~0x04;
+                return 8;
+            }
+        case 0x93: // RES 2,E
+            {
+                regs.e &= ~0x04;
+                return 8;
+            }
+        case 0x94: // RES 2,H
+            {
+                regs.h &= ~0x04;
+                return 8;
+            }
+        case 0x95: // RES 2,L
+            {
+                regs.l &= ~0x04;
+                return 8;
+            }
+        case 0x96: // RES 2,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x04;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0x97: // RES 2,A
+            {
+                regs.a &= ~0x04;
+                return 8;
+            }
+        case 0x98: // RES 3,B
+            {
+                regs.b &= ~0x08;
+                return 8;
+            }
+        case 0x99: // RES 3,C
+            {
+                regs.c &= ~0x08;
+                return 8;
+            }
+        case 0x9A: // RES 3,D
+            {
+                regs.d &= ~0x08;
+                return 8;
+            }
+        case 0x9B: // RES 3,E
+            {
+                regs.e &= ~0x08;
+                return 8;
+            }
+        case 0x9C: // RES 3,H
+            {
+                regs.h &= ~0x08;
+                return 8;
+            }
+        case 0x9D: // RES 3,L
+            {
+                regs.l &= ~0x08;
+                return 8;
+            }
+        case 0x9E: // RES 3,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x08;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0x9F: // RES 3,A
+            {
+                regs.a &= ~0x08;
+                return 8;
+            }
+        case 0xA0: // RES 4,B
+            {
+                regs.b &= ~0x10;
+                return 8;
+            }
+        case 0xA1: // RES 4,C
+            {
+                regs.c &= ~0x10;
+                return 8;
+            }
+        case 0xA2: // RES 4,D
+            {
+                regs.d &= ~0x10;
+                return 8;
+            }
+        case 0xA3: // RES 4,E
+            {
+                regs.e &= ~0x10;
+                return 8;
+            }
+        case 0xA4: // RES 4,H
+            {
+                regs.h &= ~0x10;
+                return 8;
+            }
+        case 0xA5: // RES 4,L
+            {
+                regs.l &= ~0x10;
+                return 8;
+            }
+        case 0xA6: // RES 4,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x10;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xA7: // RES 4,A
+            {
+                regs.a &= ~0x10;
+                return 8;
+            }
+        case 0xA8: // RES 5,B
+            {
+                regs.b &= ~0x20;
+                return 8;
+            }
+        case 0xA9: // RES 5,C
+            {
+                regs.c &= ~0x20;
+                return 8;
+            }
+        case 0xAA: // RES 5,D
+            {
+                regs.d &= ~0x20;
+                return 8;
+            }
+        case 0xAB: // RES 5,E
+            {
+                regs.e &= ~0x20;
+                return 8;
+            }
+        case 0xAC: // RES 5,H
+            {
+                regs.h &= ~0x20;
+                return 8;
+            }
+        case 0xAD: // RES 5,L
+            {
+                regs.l &= ~0x20;
+                return 8;
+            }
+        case 0xAE: // RES 5,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x20;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xAF: // RES 5,A
+            {
+                regs.a &= ~0x20;
+                return 8;
+            }
+        case 0xB0: // RES 6,B
+            {
+                regs.b &= ~0x40;
+                return 8;
+            }
+        case 0xB1: // RES 6,C
+            {
+                regs.c &= ~0x40;
+                return 8;
+            }
+        case 0xB2: // RES 6,D
+            {
+                regs.d &= ~0x40;
+                return 8;
+            }
+        case 0xB3: // RES 6,E
+            {
+                regs.e &= ~0x40;
+                return 8;
+            }
+        case 0xB4: // RES 6,H
+            {
+                regs.h &= ~0x40;
+                return 8;
+            }
+        case 0xB5: // RES 6,L
+            {
+                regs.l &= ~0x40;
+                return 8;
+            }
+        case 0xB6: // RES 6,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x40;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xB7: // RES 6,A
+            {
+                regs.a &= ~0x40;
+                return 8;
+            }
+        case 0xB8: // RES 7,B
+            {
+                regs.b &= ~0x80;
+                return 8;
+            }
+        case 0xB9: // RES 7,C
+            {
+                regs.c &= ~0x80;
+                return 8;
+            }
+        case 0xBA: // RES 7,D
+            {
+                regs.d &= ~0x80;
+                return 8;
+            }
+        case 0xBB: // RES 7,E
+            {
+                regs.e &= ~0x80;
+                return 8;
+            }
+        case 0xBC: // RES 7,H
+            {
+                regs.h &= ~0x80;
+                return 8;
+            }
+        case 0xBD: // RES 7,L
+            {
+                regs.l &= ~0x80;
+                return 8;
+            }
+        case 0xBE: // RES 7,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value &= ~0x80;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xBF: // RES 7,A
+            {
+                regs.a &= ~0x80;
+                return 8;
+            }
+        case 0xC0: // SET 0,B
+            {
+                regs.b |= 0x01;
+                return 8;
+            }
+        case 0xC1: // SET 0,C
+            {
+                regs.c |= 0x01;
+                return 8;
+            }
+        case 0xC2: // SET 0,D
+            {
+                regs.d |= 0x01;
+                return 8;
+            }
+        case 0xC3: // SET 0,E
+            {
+                regs.e |= 0x01;
+                return 8;
+            }
+        case 0xC4: // SET 0,H
+            {
+                regs.h |= 0x01;
+                return 8;
+            }
+        case 0xC5: // SET 0,L
+            {
+                regs.l |= 0x01;
+                return 8;
+            }
+        case 0xC6: // SET 0,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x01;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xC7: // SET 0,A
+            {
+                regs.a |= 0x01;
+                return 8;
+            }
+        case 0xC8: // SET 1,B
+            {
+                regs.b |= 0x02;
+                return 8;
+            }
+        case 0xC9: // SET 1,C
+            {
+                regs.c |= 0x02;
+                return 8;
+            }
+        case 0xCA: // SET 1,D
+            {
+                regs.d |= 0x02;
+                return 8;
+            }
+        case 0xCB: // SET 1,E
+            {
+                regs.e |= 0x02;
+                return 8;
+            }
+        case 0xCC: // SET 1,H
+            {
+                regs.h |= 0x02;
+                return 8;
+            }
+        case 0xCD: // SET 1,L
+            {
+                regs.l |= 0x02;
+                return 8;
+            }
+        case 0xCE: // SET 1,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x02;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xCF: // SET 1,A
+            {
+                regs.a |= 0x02;
+                return 8;
+            }
+        case 0xD0: // SET 2,B
+            {
+                regs.b |= 0x04;
+                return 8;
+            }
+        case 0xD1: // SET 2,C
+            {
+                regs.c |= 0x04;
+                return 8;
+            }
+        case 0xD2: // SET 2,D
+            {
+                regs.d |= 0x04;
+                return 8;
+            }
+        case 0xD3: // SET 2,E
+            {
+                regs.e |= 0x04;
+                return 8;
+            }
+        case 0xD4: // SET 2,H
+            {
+                regs.h |= 0x04;
+                return 8;
+            }
+        case 0xD5: // SET 2,L
+            {
+                regs.l |= 0x04;
+                return 8;
+            }
+        case 0xD6: // SET 2,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x04;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xD7: // SET 2,A
+            {
+                regs.a |= 0x04;
+                return 8;
+            }
+        case 0xD8: // SET 3,B
+            {
+                regs.b |= 0x08;
+                return 8;
+            }
+        case 0xD9: // SET 3,C
+            {
+                regs.c |= 0x08;
+                return 8;
+            }
+        case 0xDA: // SET 3,D
+            {
+                regs.d |= 0x08;
+                return 8;
+            }
+        case 0xDB: // SET 3,E
+            {
+                regs.e |= 0x08;
+                return 8;
+            }
+        case 0xDC: // SET 3,H
+            {
+                regs.h |= 0x08;
+                return 8;
+            }
+        case 0xDD: // SET 3,L
+            {
+                regs.l |= 0x08;
+                return 8;
+            }
+        case 0xDE: // SET 3,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x08;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xDF: // SET 3,A
+            {
+                regs.a |= 0x08;
+                return 8;
+            }
+        case 0xE0: // SET 4,B
+            {
+                regs.b |= 0x10;
+                return 8;
+            }
+        case 0xE1: // SET 4,C
+            {
+                regs.c |= 0x10;
+                return 8;
+            }
+        case 0xE2: // SET 4,D
+            {
+                regs.d |= 0x10;
+                return 8;
+            }
+        case 0xE3: // SET 4,E
+            {
+                regs.e |= 0x10;
+                return 8;
+            }
+        case 0xE4: // SET 4,H
+            {
+                regs.h |= 0x10;
+                return 8;
+            }
+        case 0xE5: // SET 4,L
+            {
+                regs.l |= 0x10;
+                return 8;
+            }
+        case 0xE6: // SET 4,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x10;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xE7: // SET 4,A
+            {
+                regs.a |= 0x10;
+                return 8;
+            }
+        case 0xE8: // SET 5,B
+            {
+                regs.b |= 0x20;
+                return 8;
+            }
+        case 0xE9: // SET 5,C
+            {
+                regs.c |= 0x20;
+                return 8;
+            }
+        case 0xEA: // SET 5,D
+            {
+                regs.d |= 0x20;
+                return 8;
+            }
+        case 0xEB: // SET 5,E
+            {
+                regs.e |= 0x20;
+                return 8;
+            }
+        case 0xEC: // SET 5,H
+            {
+                regs.h |= 0x20;
+                return 8;
+            }
+        case 0xED: // SET 5,L
+            {
+                regs.l |= 0x20;
+                return 8;
+            }
+        case 0xEE: // SET 5,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x20;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xEF: // SET 5,A
+            {
+                regs.a |= 0x20;
+                return 8;
+            }
+        case 0xF0: // SET 6,B
+            {
+                regs.b |= 0x40;
+                return 8;
+            }
+        case 0xF1: // SET 6,C
+            {
+                regs.c |= 0x40;
+                return 8;
+            }
+        case 0xF2: // SET 6,D
+            {
+                regs.d |= 0x40;
+                return 8;
+            }
+        case 0xF3: // SET 6,E
+            {
+                regs.e |= 0x40;
+                return 8;
+            }
+        case 0xF4: // SET 6,H
+            {
+                regs.h |= 0x40;
+                return 8;
+            }
+        case 0xF5: // SET 6,L
+            {
+                regs.l |= 0x40;
+                return 8;
+            }
+        case 0xF6: // SET 6,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x40;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xF7: // SET 6,A
+            {
+                regs.a |= 0x40;
+                return 8;
+            }
+        case 0xF8: // SET 7,B
+            {
+                regs.b |= 0x80;
+                return 8;
+            }
+        case 0xF9: // SET 7,C
+            {
+                regs.c |= 0x80;
+                return 8;
+            }
+        case 0xFA: // SET 7,D
+            {
+                regs.d |= 0x80;
+                return 8;
+            }
+        case 0xFB: // SET 7,E
+            {
+                regs.e |= 0x80;
+                return 8;
+            }
+        case 0xFC: // SET 7,H
+            {
+                regs.h |= 0x80;
+                return 8;
+            }
+        case 0xFD: // SET 7,L
+            {
+                regs.l |= 0x80;
+                return 8;
+            }
+        case 0xFE: // SET 7,(HL)
+            {
+                uint16_t hL = getHL();
+                uint8_t value = memory->read(hL);
+                value |= 0x80;
+                memory->write(hL, value);
+                return 16;
+            }
+        case 0xFF: // SET 7,A
+            {
+                regs.a |= 0x80;
+                return 8;
+            }
         // ... 256 cases total
         default:
             std::cout << "Unknown CB opcode: 0x" << std::hex << (int)opcode 
@@ -2592,22 +4115,194 @@ class PPU {
 private:
     Memory* memory;
     std::array<uint32_t, SCREEN_WIDTH * SCREEN_HEIGHT> framebuffer;
+    int mode; // PPU mode
+    int mode_cycles; // Cycles spent in current mode
+    int scanline; // Current scanline (0-153)
     
 public:
     PPU(Memory* mem) : memory(mem) {
         framebuffer.fill(0xFFFFFFFF);  // White
+        mode = 2;
+        mode_cycles = 0;
+        scanline = 0;
     }
     
     void step(int cycles) {
-        // TODO: Implement PPU timing and rendering
-        // PPU operates in different modes:
-        // Mode 2: OAM Scan (80 cycles)
-        // Mode 3: Drawing (172 cycles)
-        // Mode 0: H-Blank (204 cycles)
-        // Mode 1: V-Blank (4560 cycles, 10 scanlines)
         
-        // For now, just clear to white
+    mode_cycles += cycles;
+    
+    // Mode 2: OAM Scan (80 cycles)
+    if (mode == 2) {
+        if (mode_cycles >= 80) {
+            mode_cycles -= 80;
+            mode = 3;  // Move to drawing mode
+            
+            uint8_t stat = memory->read(0xFF41);
+            stat = (stat & 0xFC) | mode;
+            memory->write(0xFF41, stat);
+        }
     }
+    // Mode 3: Drawing (172 cycles)
+    else if (mode == 3) {
+        if (mode_cycles >= 172) {  
+            mode_cycles -= 172;
+            mode = 0; 
+
+            renderScanline();
+            
+            uint8_t stat = memory->read(0xFF41);
+            stat = (stat & 0xFC) | mode;
+            memory->write(0xFF41, stat);
+        }
+    }
+    // Mode 0: H-Blank (204 cycles)
+    else if (mode == 0) {
+        if (mode_cycles >= 204) {  // What goes here?
+            mode_cycles -= 204;
+            
+            // End of scanline - what happens next?
+            scanline++;  
+            
+            if (scanline < 144) {
+                // Still in visible area
+                mode = 2;  // Back to OAM scan
+            } else {
+                // Entering V-Blank
+                mode = 1; // Switch to V-Blank mode
+            }
+            // Update LY register
+            memory->write(0xFF44, scanline);
+            // Update STAT register
+            uint8_t stat = memory->read(0xFF41);
+            stat = (stat & 0xFC) | mode;
+            memory->write(0xFF41, stat);
+            
+        }
+    }
+    // Mode 1: V-Blank (456 cycles per line, 10 lines)
+    else if (mode == 1) {
+        if (mode_cycles >= 456) {  // How many cycles per V-Blank line?
+            mode_cycles -= 456;
+            scanline++;
+            
+            if (scanline > 153) {  // When does V-Blank end? (hint: line 153)
+                // Start new frame
+                scanline = 0;
+                mode = 2;  // Back to OAM scan
+            }
+            
+            // Update LY register
+            memory->write(0xFF44, scanline);
+            
+            // Update STAT register
+            uint8_t stat = memory->read(0xFF41);
+            stat = (stat & 0xFC) | mode;
+            memory->write(0xFF41, stat);
+        }
+    }
+}
+
+void renderScanline() {
+    // Read LCD control register
+    uint8_t lcdc = memory->read(0xFF40);
+    
+    // Check if LCD is completely off (bit 7)
+    if (!(lcdc & 0x80)) {
+        // LCD is OFF - don't render anything, keep showing last frame
+        return;
+    }
+    
+    // Check if background is enabled (bit 0)
+    if (!(lcdc & 0x01)) {
+        // Background disabled - fill scanline with white
+        for (int x = 0; x < SCREEN_WIDTH; x++) {
+            int fb_index = scanline * SCREEN_WIDTH + x;
+            framebuffer[fb_index] = 0xFFFFFFFF;
+        }
+        return;
+    }
+    
+    // Read scroll registers
+    uint8_t scy = memory->read(0xFF42);  // Scroll Y
+    uint8_t scx = memory->read(0xFF43);  // Scroll X
+    
+    // Which tile map to use? (bit 3 of LCDC)
+    uint16_t tile_map_base = (lcdc & 0x08) ? 0x9C00 : 0x9800;
+    
+    // Which tile data to use? (bit 4 of LCDC)
+    bool use_signed = !(lcdc & 0x10);
+    uint16_t tile_data_base = use_signed ? 0x9000 : 0x8000;
+    
+    // Calculate which row of the background we're drawing
+    uint8_t bg_y = (scanline + scy) & 0xFF;  // Wrap around
+    uint8_t tile_row = bg_y / 8;   // Which row of tiles
+    uint8_t pixel_row = bg_y % 8;  // Which row within the tile
+    
+    // Draw each pixel in this scanline
+    for (int x = 0; x < SCREEN_WIDTH; x++) {
+        // Calculate background position
+        uint8_t bg_x = (x + scx) & 0xFF;  // Wrap around
+        uint8_t tile_col = bg_x / 8;
+        uint8_t pixel_col = bg_x % 8;
+        
+        // Get tile number from tile map
+        uint16_t tile_map_addr = tile_map_base + (tile_row * 32) + tile_col;
+        uint8_t tile_num = memory->read(tile_map_addr);
+        
+        // Calculate tile data address
+        uint16_t tile_addr;
+        if (use_signed) {
+            int8_t signed_tile = (int8_t)tile_num;
+            tile_addr = tile_data_base + ((signed_tile + 128) * 16);
+        } else {
+            tile_addr = tile_data_base + (tile_num * 16);
+        }
+        
+        // Read the two bytes for this pixel row
+        uint8_t byte1 = memory->read(tile_addr + (pixel_row * 2));
+        uint8_t byte2 = memory->read(tile_addr + (pixel_row * 2) + 1);
+        
+        // Extract the pixel color
+        int bit = 7 - pixel_col;
+        uint8_t color_num = ((byte2 >> bit) & 1) << 1 | ((byte1 >> bit) & 1);
+        
+        // Convert to RGB
+        uint32_t color;
+        switch (color_num) {
+            case 0: color = 0xFFFFFFFF; break;
+            case 1: color = 0xFFAAAAAA; break;
+            case 2: color = 0xFF555555; break;
+            case 3: color = 0xFF000000; break;
+        }
+        
+        // Draw to framebuffer
+        int fb_index = scanline * SCREEN_WIDTH + x;
+        framebuffer[fb_index] = color;
+    }
+}
+
+void drawTile(int tile_num, int x, int y) {
+   uint16_t tile_addr = 0x8000 + (tile_num * 16);
+   for (int row = 0; row < 8; row++) {
+        uint8_t byte1 = memory->read(tile_addr + row * 2);
+        uint8_t byte2 = memory->read(tile_addr + row * 2 + 1);
+        for (int col = 0; col < 8; col++) {
+            int bit = 7 - col;
+            uint8_t color_num = ((byte2 >> bit) & 1) << 1 | ((byte1 >> bit) & 1);
+            uint32_t color;
+            switch (color_num) {
+                case 0: color = 0xFFFFFFFF; break; // White
+                case 1: color = 0xFFAAAAAA; break; // Light gray
+                case 2: color = 0xFF555555; break; // Dark gray
+                case 3: color = 0xFF000000; break; // Black
+            }
+            int pixel_x = x + col;
+            int pixel_y = y + row;
+            int fb_index = pixel_y * SCREEN_WIDTH + pixel_x;
+            framebuffer[fb_index] = color;
+            }
+        }
+   }
     
     const std::array<uint32_t, SCREEN_WIDTH * SCREEN_HEIGHT>& getFramebuffer() {
         return framebuffer;
@@ -2619,23 +4314,83 @@ private:
     Memory memory;
     CPU cpu;
     PPU ppu;
+    Timer timer;
+    std::array<int, 8> button_hold_frames;
     
 public:
-    GameBoy() : cpu(&memory), ppu(&memory) {}
+    GameBoy() : cpu(&memory), ppu(&memory), timer(&memory) {
+        button_hold_frames.fill(0);
+    }
     
     bool loadROM(const std::string& filename) {
         return memory.loadROM(filename);
     }
     
-    void step() {
+    int step() {
         int cycles = cpu.step();
         ppu.step(cycles);
-        // TODO: Update timers, handle interrupts
+        timer.step(cycles);
+        return cycles;
     }
     
     const std::array<uint32_t, SCREEN_WIDTH * SCREEN_HEIGHT>& getScreen() {
         return ppu.getFramebuffer();
     }
+
+    void updateButtonStates() {
+        // Release buttons that have been held long enough
+        for (int i = 0; i < 4; i++) {  // Buttons
+            if (button_hold_frames[i] > 0) {
+                button_hold_frames[i]--;
+                if (button_hold_frames[i] == 0) {
+                    memory.releaseButton(i);
+                }
+            }
+        }
+        for (int i = 0; i < 4; i++) {  // Directions
+            if (button_hold_frames[i + 4] > 0) {
+                button_hold_frames[i + 4]--;
+                if (button_hold_frames[i + 4] == 0) {
+                    memory.releaseDirection(i);
+                }
+            }
+        }
+    }
+    
+    void pressStart() { 
+        std::cout << "GameBoy::pressStart() called" << std::endl;
+        memory.pressButton(Memory::BTN_START);
+        button_hold_frames[Memory::BTN_START] = 5;  // Hold for 5 frames
+    }
+    void pressA() { 
+        memory.pressButton(Memory::BTN_A);
+        button_hold_frames[Memory::BTN_A] = 5;
+    }
+    void pressB() { 
+        memory.pressButton(Memory::BTN_B);
+        button_hold_frames[Memory::BTN_B] = 5;
+    }
+    void pressSelect() { 
+        memory.pressButton(Memory::BTN_SELECT);
+        button_hold_frames[Memory::BTN_SELECT] = 5;
+    }
+    void pressUp() { 
+        memory.pressDirection(Memory::DIR_UP);
+        button_hold_frames[Memory::DIR_UP + 4] = 5;
+    }
+    void pressDown() { 
+        memory.pressDirection(Memory::DIR_DOWN);
+        button_hold_frames[Memory::DIR_DOWN + 4] = 5;
+    }
+    void pressLeft() { 
+        memory.pressDirection(Memory::DIR_LEFT);
+        button_hold_frames[Memory::DIR_LEFT + 4] = 5;
+    }
+    void pressRight() { 
+        memory.pressDirection(Memory::DIR_RIGHT);
+        button_hold_frames[Memory::DIR_RIGHT + 4] = 5;
+    }
+
 };
 
 // SDL Display
@@ -2702,14 +4457,42 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_QUIT) {
                 running = false;
             }
-            // TODO: Handle joypad input
+            // Key pressed
+        if (event.type == SDL_KEYDOWN) {
+              std::cout << "SDL Key pressed: " << event.key.keysym.sym << std::endl;
+    switch (event.key.keysym.sym) {
+        case SDLK_RETURN: 
+            std::cout << "START button detected!" << std::endl;
+            gameboy.pressStart(); 
+            break;
+                case SDLK_RSHIFT: gameboy.pressSelect(); break;
+                case SDLK_z: gameboy.pressA(); break;
+                case SDLK_x: gameboy.pressB(); break;
+                case SDLK_UP: gameboy.pressUp(); break;
+                case SDLK_DOWN: gameboy.pressDown(); break;
+                case SDLK_LEFT: gameboy.pressLeft(); break;
+                case SDLK_RIGHT: gameboy.pressRight(); break;
+            }
         }
         
-        // Run some CPU cycles
-        for (int i = 0; i < 1000; i++) {
-            gameboy.step();
+          gameboy.updateButtonStates();  // Add this line
+    
+    int cycles_this_frame = 0;
+    while (cycles_this_frame < 70224) {
+        cycles_this_frame += gameboy.step();
+    }
+    
+    display.render(gameboy.getScreen());
+    SDL_Delay(16);
         }
         
+        
+
+        int cycles_this_frame = 0;
+        while (cycles_this_frame < 70224) {  // ✅ Proper Game Boy speed
+            cycles_this_frame += gameboy.step();  // ✅ Accumulate cycles
+        }
+
         display.render(gameboy.getScreen());
         SDL_Delay(16);
     }
