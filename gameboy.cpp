@@ -8,6 +8,15 @@
 #include <array>
 #include <vector>
 #include <cstdint>
+#include <cmath>
+
+
+// Forward declarations
+class Memory;
+class APU;
+class CPU;
+class PPU;
+class Timer;
 
 // Game Boy screen is 160x144 pixels
 const int SCREEN_WIDTH = 160;
@@ -26,6 +35,10 @@ const int SCALE = 4;
 // 0xFF80-0xFFFE: High RAM
 // 0xFFFF: Interrupt Enable
 
+
+
+
+
 class Memory {
 private:
     std::vector<uint8_t> rom;           // Cartridge ROM
@@ -39,6 +52,7 @@ private:
     uint8_t if_register;                // Interrupt Flag
     uint8_t joypad_buttons;    // Buttons: START, SELECT, B, A
     uint8_t joypad_directions; // Directions: DOWN, UP, LEFT, RIGHT
+    APU* apu;                          // Audio Processing Unit pointer
 
 public:
     Memory() {
@@ -51,6 +65,7 @@ public:
         if_register = 0;
         joypad_buttons = 0x0F;    // All released (1 = not pressed)
         joypad_directions = 0x0F; // All released
+        apu = nullptr;
     }
     
     bool loadROM(const std::string& filename) {
@@ -74,6 +89,8 @@ public:
     void incrementDIV() {
         io[0x04] = (io[0x04] + 1) & 0xFF;
     }
+    
+    void setAPU(APU* apu_ptr) { apu = apu_ptr; }
     
     uint8_t read(uint16_t addr) {
         // TODO: Implement memory mapping
@@ -209,33 +226,39 @@ return io[addr - 0xFF00];
             oam[addr - 0xFE00] = value;
         }
         else if (addr >= 0xFF00 && addr < 0xFF80) {
-    // I/O Registers
-    if (addr == 0xFF00) {
-        // P1/JOYP - Only bits 4-5 are writable (button/direction select)
-        io[0x00] = (value & 0x30);
-    return;
-    }
-    if (addr == 0xFF0F) {
-            if_register = value;
+            // I/O Registers
+            if (addr == 0xFF00) {
+                // P1/JOYP - Only bits 4-5 are writable (button/direction select)
+                io[0x00] = (value & 0x30);
             return;
-        }
-
-     if (addr == 0xFF46) {
-            // DMA Transfer: Copy 160 bytes from XX00-XX9F to OAM (FE00-FE9F)
-            uint16_t source = value << 8;  // Value * 0x100
-            
-            //std::cout << "DMA Transfer from 0x" << std::hex << source 
-            //       << " to OAM" << std::dec << std::endl;
-            
-            for (int i = 0; i < 0xA0; i++) {
-                oam[i] = read(source + i);
             }
-            io[0x46] = value;  // Store the DMA register value
-            return;
+            if (addr == 0xFF0F) {
+                    if_register = value;
+                    return;
+                }
+            if (addr >= 0xFF10 && addr <= 0xFF3F) {
+                // Audio registers
+                io[addr - 0xFF00] = value;
+                return;
+            }
+
+
+            if (addr == 0xFF46) {
+                    // DMA Transfer: Copy 160 bytes from XX00-XX9F to OAM (FE00-FE9F)
+                    uint16_t source = value << 8;  // Value * 0x100
+                    
+                    //std::cout << "DMA Transfer from 0x" << std::hex << source 
+                    //       << " to OAM" << std::dec << std::endl;
+                    
+                    for (int i = 0; i < 0xA0; i++) {
+                        oam[i] = read(source + i);
+                    }
+                    io[0x46] = value;  // Store the DMA register value
+                    return;
+                }
+            
+            io[addr - 0xFF00] = value;
         }
-    
-    io[addr - 0xFF00] = value;
-}
         else if (addr >= 0xFF80 && addr < 0xFFFF) {
             // High RAM
             hram[addr - 0xFF80] = value;
@@ -246,6 +269,7 @@ return io[addr - 0xFF00];
         }
         
     }
+
 
     // Button presses (bit 0 = pressed, 1 = not pressed)
     void pressButton(int button) {
@@ -332,6 +356,136 @@ public:
         }
     }
 }
+};
+
+class APU {
+private:
+    Memory* memory;
+    
+    // Channel 1: Square wave with sweep
+    struct {
+        bool enabled;
+        int frequency;
+        int duty;
+        int volume;
+        float phase;
+    } ch1;
+    
+    // Channel 2: Square wave
+    struct {
+        bool enabled;
+        int frequency;
+        int duty;
+        int volume;
+        float phase;
+    } ch2;
+    
+    // Audio state
+    float sample_timer;
+    static constexpr float SAMPLE_RATE = 44100.0f;
+    static constexpr float GB_CLOCK = 4194304.0f;  // Game Boy CPU clock
+    
+public:
+    APU(Memory* mem) : memory(mem) {
+        ch1 = {};
+        ch2 = {};
+        sample_timer = 0.0f;
+    }
+    
+    void step(int cycles) {
+
+        uint8_t nr14 = memory->read(0xFF14);
+        if (nr14 & 0x80) {
+            updateChannel1();
+        }
+        
+        // Check if channel 2 was just triggered
+        uint8_t nr24 = memory->read(0xFF19);
+        if (nr24 & 0x80) {
+            updateChannel2();
+        }
+        for(int i = 0; i < cycles; i++) {
+            
+            ch1.phase += ch1.frequency / GB_CLOCK;
+            ch2.phase += ch2.frequency / GB_CLOCK;
+            
+            // Keep phase in range [0, 1)
+            if (ch1.phase >= 1.0f) ch1.phase -= 1.0f;
+            if (ch2.phase >= 1.0f) ch2.phase -= 1.0f;
+                }
+
+        }
+    
+    float generateSample() {
+        float sample = 0.0f;
+
+        if (ch1.enabled) {
+            sample += generateSquare(ch1.phase, ch1.duty) * (ch1.volume / 15.0f);
+        }
+
+        if (ch2.enabled) {
+            sample += generateSquare(ch2.phase, ch2.duty) * (ch2.volume / 15.0f);
+        }
+
+
+        return sample * 0.5f;  // Simple normalization
+    }
+
+    void updateChannel1() {
+        ch1.duty = (memory->read(0xFF11) >> 6) & 0x03;
+        ch1.volume = (memory->read(0xFF12) >> 4) & 0x0F;
+        
+        uint8_t nr14 = memory->read(0xFF14);
+        uint16_t freq_data = ((nr14 & 0x07) << 8) | memory->read(0xFF13);
+        ch1.frequency = 131072 / (2048 - freq_data);
+        
+        // Check trigger bit (bit 7)
+        if (nr14 & 0x80) {
+            ch1.enabled = true;
+            ch1.phase = 0.0f;
+            
+            // ✅ Clear the trigger bit (hardware does this automatically)
+            memory->write(0xFF14, nr14 & 0x7F);
+        }
+
+    }
+    
+    void updateChannel2() {
+        // NR21 (0xFF16): Duty and length [DD-- ----]
+        ch2.duty = (memory->read(0xFF16) >> 6) & 0x03;
+        
+        // NR22 (0xFF17): Volume [VVVV EDDD]
+        ch2.volume = (memory->read(0xFF17) >> 4) & 0x0F;
+        
+        // NR23 (0xFF18): Frequency LOW byte
+        // NR24 (0xFF19): Trigger and frequency HIGH [T--- -HHH]
+        uint8_t nr24 = memory->read(0xFF19);
+        uint16_t freq_data = ((nr24 & 0x07) << 8) | memory->read(0xFF18);
+        ch2.frequency = 131072 / (2048 - freq_data);
+        
+        // Check trigger bit (bit 7)
+        if (nr24 & 0x80) {
+            ch2.enabled = true;
+            ch2.phase = 0.0f;
+            
+            // Clear the trigger bit
+            memory->write(0xFF19, nr24 & 0x7F);
+        }
+    }
+    
+private:
+    float generateSquare(float phase, int duty) {
+        float duty_cycle = 0.5f;
+        switch(duty) {
+            case 0: duty_cycle = 0.125f; break;
+            case 1: duty_cycle = 0.25f; break;
+            case 2: duty_cycle = 0.5f; break;
+            case 3: duty_cycle = 0.75f; break;
+        }
+        return (fmod(phase, 1.0f) < duty_cycle) ? 1.0f : -1.0f;
+    }
+    
+    
 };
 
 class CPU {
@@ -4496,11 +4650,13 @@ private:
     CPU cpu;
     PPU ppu;
     Timer timer;
+    APU apu;
     std::array<bool, 8> button_states;
     
 public:
-    GameBoy() : cpu(&memory), ppu(&memory), timer(&memory) {
+    GameBoy() : cpu(&memory), ppu(&memory), timer(&memory), apu(&memory) {
         button_states.fill(false);
+        memory.setAPU(&apu);
     }
     
     bool loadROM(const std::string& filename) {
@@ -4511,11 +4667,16 @@ public:
         int cycles = cpu.step();
         ppu.step(cycles);
         timer.step(cycles);
+        apu.step(cycles);
         return cycles;
     }
     
     const std::array<uint32_t, SCREEN_WIDTH * SCREEN_HEIGHT>& getScreen() {
         return ppu.getFramebuffer();
+    }
+
+    float getAudioSample() {
+        return apu.generateSample();
     }
 
     void setButtonState(int button, bool pressed) {
@@ -4540,6 +4701,8 @@ public:
 
 };
 
+
+
 // SDL Display
 class Display {
 private:
@@ -4549,7 +4712,6 @@ private:
     
 public:
     Display() {
-        SDL_Init(SDL_INIT_VIDEO);
         
         window = SDL_CreateWindow(
             "Game Boy Emulator",
@@ -4572,7 +4734,6 @@ public:
         SDL_DestroyTexture(texture);
         SDL_DestroyRenderer(renderer);
         SDL_DestroyWindow(window);
-        SDL_Quit();
     }
     
     void render(const std::array<uint32_t, SCREEN_WIDTH * SCREEN_HEIGHT>& pixels) {
@@ -4588,6 +4749,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Usage: " << argv[0] << " <ROM file>" << std::endl;
         return 1;
     }
+
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) {
+        std::cout << "SDL could not initialize! SDL_Error: " << SDL_GetError() << std::endl;
+        return 1;
+    }
     
     GameBoy gameboy;
     Display display;
@@ -4595,6 +4761,26 @@ int main(int argc, char* argv[]) {
     if (!gameboy.loadROM(argv[1])) {
         return 1;
     }
+
+    SDL_AudioSpec want, have;
+    SDL_zero(want);
+    want.freq = 44100;
+    want.format = AUDIO_F32;
+    want.channels = 1;
+    want.samples = 512;
+    want.callback = nullptr;  // We'll use SDL_QueueAudio instead
+    
+    SDL_AudioDeviceID audio_device = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+    if (audio_device == 0) {
+        std::cout << "Failed to open audio: " << SDL_GetError() << std::endl;
+        return 1;
+    }
+    
+    SDL_PauseAudioDevice(audio_device, 0);  // Start playing
+    
+    // Audio buffer
+    std::vector<float> audio_buffer;
+    audio_buffer.reserve(1024);
     
     bool running = true;
     SDL_Event event;
@@ -4638,13 +4824,28 @@ int main(int argc, char* argv[]) {
         int cycles_this_frame = 0;
         while (cycles_this_frame < 70224) {
             cycles_this_frame += gameboy.step();
+            static int audio_cycles = 0;
+            audio_cycles += gameboy.step();
+            if (audio_cycles >= 95) {
+                audio_cycles -= 95;
+                audio_buffer.push_back(gameboy.getAudioSample());
+            }
+        }
+
+        if (!audio_buffer.empty()) {
+            SDL_QueueAudio(audio_device, audio_buffer.data(), audio_buffer.size() * sizeof(float));
+            audio_buffer.clear();
         }
 
         display.render(gameboy.getScreen());
-        SDL_Delay(16);
+        SDL_Delay(16); // Roughly 60 FPS
     }
+    SDL_CloseAudioDevice(audio_device);
+    SDL_Quit();
     return 0;
 }
+
+
 /*
 === YOUR ROADMAP ===
 
