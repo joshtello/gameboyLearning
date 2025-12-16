@@ -36,6 +36,7 @@ private:
     std::array<uint8_t, 0x80> io;       // I/O registers
     
     uint8_t ie_register;                // Interrupt Enable
+    uint8_t if_register;                // Interrupt Flag
     uint8_t joypad_buttons;    // Buttons: START, SELECT, B, A
     uint8_t joypad_directions; // Directions: DOWN, UP, LEFT, RIGHT
 
@@ -47,6 +48,7 @@ public:
         hram.fill(0);
         io.fill(0);
         ie_register = 0;
+        if_register = 0;
         joypad_buttons = 0x0F;    // All released (1 = not pressed)
         joypad_directions = 0x0F; // All released
     }
@@ -97,9 +99,9 @@ public:
         else if (addr >= 0xFF00 && addr < 0xFF80) {
                 // I/O Registers
             if (addr == 0xFF00) {
-    uint8_t p1 = io[0x00];  // Now this will be 0x10 (not 0xD0)
-    uint8_t result = p1 | 0xC0;  // Set bits 6-7: 0x10 | 0xC0 = 0xD0
-    
+                uint8_t p1 = io[0x00];  // Now this will be 0x10 (not 0xD0)
+                uint8_t result = p1 | 0xC0;  // Set bits 6-7: 0x10 | 0xC0 = 0xD0
+              
     if (!(p1 & 0x20)) {  // Check bit 5 - button select
         result = (result & 0xF0) | (joypad_buttons & 0x0F);
     } 
@@ -107,10 +109,12 @@ public:
     if (!(p1 & 0x10)) {  // ✅ Now this works! 0x10 & 0x10 = 0, so !0 = true
         result = (result & 0xF0) | (joypad_directions & 0x0F);
     }
-    
     return result;
 
 }
+if (addr == 0xFF0F) {
+            return if_register;
+        }
 return io[addr - 0xFF00];
         }
         else if (addr >= 0xFF80 && addr < 0xFFFF) {
@@ -131,7 +135,7 @@ return io[addr - 0xFF00];
             static std::string buffer;
             
             char c = (char)value;
-            std::cout << c << std::flush;
+            //std::cout << c << std::flush;
             
             // Log with hex values
             logfile << "Char: '" << c << "' (0x" << std::hex << (int)(uint8_t)value << ")" << std::dec << std::endl;
@@ -195,6 +199,13 @@ return io[addr - 0xFF00];
         }
         else if (addr >= 0xFE00 && addr < 0xFEA0) {
             // OAM
+            static bool first_oam_write = true;
+            if (first_oam_write && value != 0) {
+                std::cout << "\n!!! FIRST OAM WRITE !!!" << std::endl;
+                std::cout << "Address: 0x" << std::hex << addr << std::dec << std::endl;
+                std::cout << "Value: 0x" << std::hex << (int)value << std::dec << std::endl;
+                first_oam_write = false;
+            }
             oam[addr - 0xFE00] = value;
         }
         else if (addr >= 0xFF00 && addr < 0xFF80) {
@@ -202,10 +213,26 @@ return io[addr - 0xFF00];
     if (addr == 0xFF00) {
         // P1/JOYP - Only bits 4-5 are writable (button/direction select)
         io[0x00] = (value & 0x30);
-    std::cout << "WRITE JOYPAD: value=0x" << std::hex << (int)value 
-              << " stored=0x" << (int)io[0x00] << std::dec << std::endl;
     return;
     }
+    if (addr == 0xFF0F) {
+            if_register = value;
+            return;
+        }
+
+     if (addr == 0xFF46) {
+            // DMA Transfer: Copy 160 bytes from XX00-XX9F to OAM (FE00-FE9F)
+            uint16_t source = value << 8;  // Value * 0x100
+            
+            //std::cout << "DMA Transfer from 0x" << std::hex << source 
+            //       << " to OAM" << std::dec << std::endl;
+            
+            for (int i = 0; i < 0xA0; i++) {
+                oam[i] = read(source + i);
+            }
+            io[0x46] = value;  // Store the DMA register value
+            return;
+        }
     
     io[addr - 0xFF00] = value;
 }
@@ -222,10 +249,10 @@ return io[addr - 0xFF00];
 
     // Button presses (bit 0 = pressed, 1 = not pressed)
     void pressButton(int button) {
-        std::cout << "Memory::pressButton(" << (int)button << ") called" << std::endl;
-        std::cout << "Before: joypad_buttons = 0x" << std::hex << (int)joypad_buttons << std::dec << std::endl;
         joypad_buttons &= ~(1 << button);
-        std::cout << "After: joypad_buttons = 0x" << std::hex << (int)joypad_buttons << std::dec << std::endl;
+
+        uint8_t if_flag = read(0xFF0F);
+        write(0xFF0F, if_flag | 0x10);  // Set bit 4 (joypad interrupt)
     }
 
     void releaseButton(int button) {
@@ -238,6 +265,8 @@ return io[addr - 0xFF00];
 
     void releaseDirection(int direction) {
         joypad_directions |= (1 << direction);
+        uint8_t if_flag = read(0xFF0F);
+        write(0xFF0F, if_flag | 0x10);
     }
     
     // Button/Direction constants
@@ -388,13 +417,12 @@ public:
             uint8_t triggered = ie & if_flag;
             
             if (triggered) {
-                std::cout << "INTERRUPT! IE=0x" << std::hex << (int)ie 
-                  << " IF=0x" << (int)if_flag << std::dec << std::endl;
                 ime = false;  // Disable interrupts
                 
                 // Service highest priority interrupt
                 for (int i = 0; i < 5; i++) {
                     if (triggered & (1 << i)) {
+                        
                         // Clear the interrupt flag
                         memory->write(0xFF0F, if_flag & ~(1 << i));
                         
@@ -408,7 +436,14 @@ public:
                     }
                 }
             }
+        } else {
+        // ✅ ADD THIS - See why interrupts aren't enabled
+        static int debug_counter = 0;
+        if (++debug_counter % 50000 == 0) {
+            uint8_t ie = memory->read(0xFFFF);
+            uint8_t if_flag = memory->read(0xFF0F);
         }
+    }
     
         // Fetch opcode
         uint8_t opcode = memory->read(regs.pc++);
@@ -4118,6 +4153,12 @@ private:
     int mode; // PPU mode
     int mode_cycles; // Cycles spent in current mode
     int scanline; // Current scanline (0-153)
+    struct Sprite {
+        uint8_t y;
+        uint8_t x;
+        uint8_t tile;
+        uint8_t flags;
+    };
     
 public:
     PPU(Memory* mem) : memory(mem) {
@@ -4169,6 +4210,8 @@ public:
             } else {
                 // Entering V-Blank
                 mode = 1; // Switch to V-Blank mode
+                  uint8_t if_flag = memory->read(0xFF0F);
+            memory->write(0xFF0F, if_flag | 0x01);
             }
             // Update LY register
             memory->write(0xFF44, scanline);
@@ -4190,6 +4233,13 @@ public:
                 scanline = 0;
                 mode = 2;  // Back to OAM scan
             }
+
+            static int frame_count = 0;
+            if (++frame_count % 60 == 0) {  // Every 60 frames (1 second)
+            }
+        }
+        
+        
             
             // Update LY register
             memory->write(0xFF44, scanline);
@@ -4200,7 +4250,6 @@ public:
             memory->write(0xFF41, stat);
         }
     }
-}
 
 void renderScanline() {
     // Read LCD control register
@@ -4279,6 +4328,138 @@ void renderScanline() {
         int fb_index = scanline * SCREEN_WIDTH + x;
         framebuffer[fb_index] = color;
     }
+    renderSprites();
+}
+
+void renderSprites() {
+    uint8_t lcdc = memory->read(0xFF40);
+    
+    // Check if sprites are enabled (bit 1)
+    if (!(lcdc & 0x02)) {
+        return;
+    }
+    
+    // Sprite height: 8x8 or 8x16 (bit 2)
+    int sprite_height = (lcdc & 0x04) ? 16 : 8;
+    
+    // ✅ NEW DEBUG: Print first few sprites in OAM once
+    static bool printed_oam = false;
+    if (!printed_oam) {
+        std::cout << "\n=== OAM CONTENTS ===" << std::endl;
+        for (int i = 0; i < 5; i++) {  // Check first 5 sprites
+            uint16_t oam_addr = 0xFE00 + (i * 4);
+            uint8_t y = memory->read(oam_addr);
+            uint8_t x = memory->read(oam_addr + 1);
+            uint8_t tile = memory->read(oam_addr + 2);
+            uint8_t flags = memory->read(oam_addr + 3);
+            
+            std::cout << "Sprite " << i << ": "
+                     << "Y=" << std::dec << (int)y << " (screen: " << ((int)y - 16) << ") "
+                     << "X=" << (int)x << " (screen: " << ((int)x - 8) << ") "
+                     << "Tile=0x" << std::hex << (int)tile << std::dec
+                     << " Flags=0x" << std::hex << (int)flags << std::dec << std::endl;
+        }
+        std::cout << "Sprite height: " << sprite_height << std::endl;
+        printed_oam = true;
+    }
+    
+    // Read all sprites from OAM
+    std::array<Sprite, 40> sprites;
+    for (int i = 0; i < 40; i++) {
+        uint16_t oam_addr = 0xFE00 + (i * 4);
+        sprites[i].y = memory->read(oam_addr);
+        sprites[i].x = memory->read(oam_addr + 1);
+        sprites[i].tile = memory->read(oam_addr + 2);
+        sprites[i].flags = memory->read(oam_addr + 3);
+    }
+    
+    // Find sprites on current scanline (max 10 per line)
+    std::array<int, 10> visible_sprites;
+    int sprite_count = 0;
+    
+    for (int i = 0; i < 40 && sprite_count < 10; i++) {
+        int sprite_y = sprites[i].y - 16;
+        
+        // Check if sprite is on this scanline
+        if (scanline >= sprite_y && scanline < sprite_y + sprite_height) {
+            visible_sprites[sprite_count++] = i;
+        }
+    }
+    
+    // ✅ DEBUG: Count total sprites found per frame
+    static int total_sprites_found = 0;
+    static int frame_counter = 0;
+    total_sprites_found += sprite_count;
+    
+    if (scanline == 143) {  // Last visible scanline
+        frame_counter++;
+        if (frame_counter % 60 == 0) {  // Once per second
+            std::cout << "Sprites found in last frame: " << total_sprites_found << std::endl;
+        }
+        total_sprites_found = 0;
+    }
+    
+    // Draw sprites (in reverse order for priority)
+    for (int i = sprite_count - 1; i >= 0; i--) {
+        Sprite& sprite = sprites[visible_sprites[i]];
+        
+        int sprite_y = sprite.y - 16;
+        int sprite_x = sprite.x - 8;
+        
+        // Get sprite attributes
+        bool flip_y = sprite.flags & 0x40;
+        bool flip_x = sprite.flags & 0x20;
+        bool behind_bg = sprite.flags & 0x80;
+        uint8_t palette_num = (sprite.flags & 0x10) ? 1 : 0;
+        
+        // Calculate which row of the sprite we're drawing
+        int sprite_row = scanline - sprite_y;
+        if (flip_y) {
+            sprite_row = sprite_height - 1 - sprite_row;
+        }
+        
+        // Get tile data
+        uint16_t tile_addr = 0x8000 + (sprite.tile * 16) + (sprite_row * 2);
+        
+        if (sprite_height == 16) {
+            tile_addr = 0x8000 + ((sprite.tile & 0xFE) * 16) + (sprite_row * 2);
+        }
+        
+        uint8_t byte1 = memory->read(tile_addr);
+        uint8_t byte2 = memory->read(tile_addr + 1);
+        
+        // Draw 8 pixels
+        for (int x = 0; x < 8; x++) {
+            int screen_x = sprite_x + x;
+            
+            if (screen_x < 0 || screen_x >= SCREEN_WIDTH) continue;
+            
+            int bit = flip_x ? x : (7 - x);
+            uint8_t color_num = ((byte2 >> bit) & 1) << 1 | ((byte1 >> bit) & 1);
+            
+            if (color_num == 0) continue;
+            
+            uint8_t palette = memory->read(palette_num ? 0xFF49 : 0xFF48);
+            uint8_t palette_color = (palette >> (color_num * 2)) & 0x03;
+            
+            uint32_t color;
+            switch (palette_color) {
+                case 0: color = 0xFFFFFFFF; break;
+                case 1: color = 0xFFAAAAAA; break;
+                case 2: color = 0xFF555555; break;
+                case 3: color = 0xFF000000; break;
+            }
+            
+            int fb_index = scanline * SCREEN_WIDTH + screen_x;
+            if (behind_bg) {
+                if (framebuffer[fb_index] == 0xFFFFFFFF) {
+                    framebuffer[fb_index] = color;
+                }
+            } else {
+                framebuffer[fb_index] = color;
+            }
+        }
+    }
 }
 
 void drawTile(int tile_num, int x, int y) {
@@ -4315,11 +4496,11 @@ private:
     CPU cpu;
     PPU ppu;
     Timer timer;
-    std::array<int, 8> button_hold_frames;
+    std::array<bool, 8> button_states;
     
 public:
     GameBoy() : cpu(&memory), ppu(&memory), timer(&memory) {
-        button_hold_frames.fill(0);
+        button_states.fill(false);
     }
     
     bool loadROM(const std::string& filename) {
@@ -4337,58 +4518,24 @@ public:
         return ppu.getFramebuffer();
     }
 
-    void updateButtonStates() {
-        // Release buttons that have been held long enough
-        for (int i = 0; i < 4; i++) {  // Buttons
-            if (button_hold_frames[i] > 0) {
-                button_hold_frames[i]--;
-                if (button_hold_frames[i] == 0) {
-                    memory.releaseButton(i);
-                }
+    void setButtonState(int button, bool pressed) {
+        if (pressed && !button_states[button]) {
+            // Button just pressed
+            if (button < 4) {
+                memory.pressButton(button);
+            } else {
+                memory.pressDirection(button - 4);
             }
-        }
-        for (int i = 0; i < 4; i++) {  // Directions
-            if (button_hold_frames[i + 4] > 0) {
-                button_hold_frames[i + 4]--;
-                if (button_hold_frames[i + 4] == 0) {
-                    memory.releaseDirection(i);
-                }
+            button_states[button] = true;
+        } else if (!pressed && button_states[button]) {
+            // Button just released
+            if (button < 4) {
+                memory.releaseButton(button);
+            } else {
+                memory.releaseDirection(button - 4);
             }
+            button_states[button] = false;
         }
-    }
-    
-    void pressStart() { 
-        std::cout << "GameBoy::pressStart() called" << std::endl;
-        memory.pressButton(Memory::BTN_START);
-        button_hold_frames[Memory::BTN_START] = 5;  // Hold for 5 frames
-    }
-    void pressA() { 
-        memory.pressButton(Memory::BTN_A);
-        button_hold_frames[Memory::BTN_A] = 5;
-    }
-    void pressB() { 
-        memory.pressButton(Memory::BTN_B);
-        button_hold_frames[Memory::BTN_B] = 5;
-    }
-    void pressSelect() { 
-        memory.pressButton(Memory::BTN_SELECT);
-        button_hold_frames[Memory::BTN_SELECT] = 5;
-    }
-    void pressUp() { 
-        memory.pressDirection(Memory::DIR_UP);
-        button_hold_frames[Memory::DIR_UP + 4] = 5;
-    }
-    void pressDown() { 
-        memory.pressDirection(Memory::DIR_DOWN);
-        button_hold_frames[Memory::DIR_DOWN + 4] = 5;
-    }
-    void pressLeft() { 
-        memory.pressDirection(Memory::DIR_LEFT);
-        button_hold_frames[Memory::DIR_LEFT + 4] = 5;
-    }
-    void pressRight() { 
-        memory.pressDirection(Memory::DIR_RIGHT);
-        button_hold_frames[Memory::DIR_RIGHT + 4] = 5;
     }
 
 };
@@ -4458,48 +4605,46 @@ int main(int argc, char* argv[]) {
                 running = false;
             }
             // Key pressed
-        if (event.type == SDL_KEYDOWN) {
-              std::cout << "SDL Key pressed: " << event.key.keysym.sym << std::endl;
-    switch (event.key.keysym.sym) {
-        case SDLK_RETURN: 
-            std::cout << "START button detected!" << std::endl;
-            gameboy.pressStart(); 
-            break;
-                case SDLK_RSHIFT: gameboy.pressSelect(); break;
-                case SDLK_z: gameboy.pressA(); break;
-                case SDLK_x: gameboy.pressB(); break;
-                case SDLK_UP: gameboy.pressUp(); break;
-                case SDLK_DOWN: gameboy.pressDown(); break;
-                case SDLK_LEFT: gameboy.pressLeft(); break;
-                case SDLK_RIGHT: gameboy.pressRight(); break;
+            if (event.type == SDL_KEYDOWN && !event.key.repeat) {
+                switch (event.key.keysym.sym) {
+                    case SDLK_RETURN: gameboy.setButtonState(Memory::BTN_START, true); break;
+                    case SDLK_RSHIFT: gameboy.setButtonState(Memory::BTN_SELECT, true); break;
+                    case SDLK_z: gameboy.setButtonState(Memory::BTN_A, true); break;
+                    case SDLK_x: gameboy.setButtonState(Memory::BTN_B, true); break;
+                    case SDLK_UP: gameboy.setButtonState(Memory::DIR_UP + 4, true); break;
+                    case SDLK_DOWN: gameboy.setButtonState(Memory::DIR_DOWN + 4, true); break;
+                    case SDLK_LEFT: gameboy.setButtonState(Memory::DIR_LEFT + 4, true); break;
+                    case SDLK_RIGHT: gameboy.setButtonState(Memory::DIR_RIGHT + 4, true); break;
+                }
+            }
+            
+            // ✅ Handle key release
+            if (event.type == SDL_KEYUP) {
+                switch (event.key.keysym.sym) {
+                    case SDLK_RETURN: gameboy.setButtonState(Memory::BTN_START, false); break;
+                    case SDLK_RSHIFT: gameboy.setButtonState(Memory::BTN_SELECT, false); break;
+                    case SDLK_z: gameboy.setButtonState(Memory::BTN_A, false); break;
+                    case SDLK_x: gameboy.setButtonState(Memory::BTN_B, false); break;
+                    case SDLK_UP: gameboy.setButtonState(Memory::DIR_UP + 4, false); break;
+                    case SDLK_DOWN: gameboy.setButtonState(Memory::DIR_DOWN + 4, false); break;
+                    case SDLK_LEFT: gameboy.setButtonState(Memory::DIR_LEFT + 4, false); break;
+                    case SDLK_RIGHT: gameboy.setButtonState(Memory::DIR_RIGHT + 4, false); break;
+                }
             }
         }
         
-          gameboy.updateButtonStates();  // Add this line
-    
-    int cycles_this_frame = 0;
-    while (cycles_this_frame < 70224) {
-        cycles_this_frame += gameboy.step();
-    }
-    
-    display.render(gameboy.getScreen());
-    SDL_Delay(16);
-        }
+        // ✅ Remove the updateButtonStates() call - we handle it manually now
         
-        
-
         int cycles_this_frame = 0;
-        while (cycles_this_frame < 70224) {  // ✅ Proper Game Boy speed
-            cycles_this_frame += gameboy.step();  // ✅ Accumulate cycles
+        while (cycles_this_frame < 70224) {
+            cycles_this_frame += gameboy.step();
         }
 
         display.render(gameboy.getScreen());
         SDL_Delay(16);
     }
-    
     return 0;
 }
-
 /*
 === YOUR ROADMAP ===
 
