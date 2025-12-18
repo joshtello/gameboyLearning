@@ -53,6 +53,11 @@ private:
     uint8_t joypad_buttons;    // Buttons: START, SELECT, B, A
     uint8_t joypad_directions; // Directions: DOWN, UP, LEFT, RIGHT
     APU* apu;                          // Audio Processing Unit pointer
+    int rom_bank;           // Current ROM bank (1-127)
+    int ram_bank;           // Current RAM bank (0-3)
+    bool ram_enabled;       // Is external RAM enabled?
+    uint8_t banking_mode;   // 0 = ROM banking, 1 = RAM banking
+    std::vector<uint8_t> ext_ram;  // External RAM (32KB max)
 
 public:
     Memory() {
@@ -66,6 +71,11 @@ public:
         joypad_buttons = 0x0F;    // All released (1 = not pressed)
         joypad_directions = 0x0F; // All released
         apu = nullptr;
+        rom_bank = 1;  // Bank 0 is always mapped to 0x0000-0x3FFF
+        ram_bank = 0;
+        ram_enabled = false;
+        banking_mode = 0;
+        ext_ram.resize(0x8000, 0);  // 32KB
     }
     
     bool loadROM(const std::string& filename) {
@@ -93,53 +103,61 @@ public:
     void setAPU(APU* apu_ptr) { apu = apu_ptr; }
     
     uint8_t read(uint16_t addr) {
-        // TODO: Implement memory mapping
-        // This is where you handle different memory regions
-        
-        if (addr < 0x8000) {
-            // ROM - TODO: Handle banking
+    // ROM Bank 0
+        if (addr < 0x4000) {
             if (addr < rom.size()) return rom[addr];
             return 0xFF;
         }
+        // Switchable ROM Bank
+        else if (addr >= 0x4000 && addr < 0x8000) {
+            uint32_t rom_addr = (rom_bank * 0x4000) + (addr - 0x4000);
+            if (rom_addr < rom.size()) return rom[rom_addr];
+            return 0xFF;
+        }
+        // VRAM
         else if (addr >= 0x8000 && addr < 0xA000) {
-            // VRAM
             return vram[addr - 0x8000];
         }
+        // External RAM
+        else if (addr >= 0xA000 && addr < 0xC000) {
+            if (ram_enabled) {
+                uint16_t ram_addr = (ram_bank * 0x2000) + (addr - 0xA000);
+                return ext_ram[ram_addr];
+            }
+            return 0xFF;
+        }
+        // Work RAM
         else if (addr >= 0xC000 && addr < 0xE000) {
-            // Work RAM
             return wram[addr - 0xC000];
         }
+        // OAM
         else if (addr >= 0xFE00 && addr < 0xFEA0) {
-            // OAM
             return oam[addr - 0xFE00];
         }
+        // I/O Registers
         else if (addr >= 0xFF00 && addr < 0xFF80) {
-                // I/O Registers
             if (addr == 0xFF00) {
-                uint8_t p1 = io[0x00];  // Now this will be 0x10 (not 0xD0)
-                uint8_t result = p1 | 0xC0;  // Set bits 6-7: 0x10 | 0xC0 = 0xD0
-              
-    if (!(p1 & 0x20)) {  // Check bit 5 - button select
-        result = (result & 0xF0) | (joypad_buttons & 0x0F);
-    } 
-    
-    if (!(p1 & 0x10)) {  // ✅ Now this works! 0x10 & 0x10 = 0, so !0 = true
-        result = (result & 0xF0) | (joypad_directions & 0x0F);
-    }
-    return result;
-
-}
-if (addr == 0xFF0F) {
-            return if_register;
+                uint8_t p1 = io[0x00];
+                uint8_t result = p1 | 0xC0;
+                if (!(p1 & 0x20)) {
+                    result = (result & 0xF0) | (joypad_buttons & 0x0F);
+                }
+                if (!(p1 & 0x10)) {
+                    result = (result & 0xF0) | (joypad_directions & 0x0F);
+                }
+                return result;
+            }
+            if (addr == 0xFF0F) {
+                return if_register;
+            }
+            return io[addr - 0xFF00];
         }
-return io[addr - 0xFF00];
-        }
+        // High RAM
         else if (addr >= 0xFF80 && addr < 0xFFFF) {
-            // High RAM
             return hram[addr - 0xFF80];
         }
+        // Interrupt Enable
         else if (addr == 0xFFFF) {
-            // Interrupt Enable
             return ie_register;
         }
         
@@ -147,6 +165,44 @@ return io[addr - 0xFF00];
     }
     
     void write(uint16_t addr, uint8_t value) {
+        // MBC1 Register writes
+        if (addr < 0x2000) {
+            // 0x0000-0x1FFF: RAM Enable
+            ram_enabled = (value & 0x0F) == 0x0A;
+            return;
+        }
+        else if (addr >= 0x2000 && addr < 0x4000) {
+            // 0x2000-0x3FFF: ROM Bank Number (lower 5 bits)
+            int bank = value & 0x1F;
+            if (bank == 0) bank = 1;  // Bank 0 is not allowed
+            rom_bank = bank;
+            std::cout << "ROM Bank switched to: " << rom_bank << std::endl;
+            return;
+        }
+        else if (addr >= 0x4000 && addr < 0x6000) {
+            // 0x4000-0x5FFF: RAM Bank Number or upper ROM bank bits
+            if (banking_mode == 1) {
+                ram_bank = value & 0x03;
+            } else {
+                // Upper 2 bits of ROM bank for large ROMs
+                rom_bank = (rom_bank & 0x1F) | ((value & 0x03) << 5);
+            }
+            return;
+        }
+        else if (addr >= 0x6000 && addr < 0x8000) {
+            // 0x6000-0x7FFF: Banking Mode Select
+            banking_mode = value & 0x01;
+            return;
+        }
+        else if (addr >= 0xA000 && addr < 0xC000) {
+            // External RAM write
+            if (ram_enabled) {
+                uint16_t ram_addr = (ram_bank * 0x2000) + (addr - 0xA000);
+                ext_ram[ram_addr] = value;
+            }
+            return;
+        }
+        
         if (addr == 0xFF01) {
             static std::ofstream logfile("serial_log.txt");
             static std::string buffer;
@@ -393,7 +449,7 @@ public:
     }
     
     void step(int cycles) {
-
+    // Check if channel 1 was just triggered
         uint8_t nr14 = memory->read(0xFF14);
         if (nr14 & 0x80) {
             updateChannel1();
@@ -404,17 +460,17 @@ public:
         if (nr24 & 0x80) {
             updateChannel2();
         }
-        for(int i = 0; i < cycles; i++) {
-            
-            ch1.phase += ch1.frequency / GB_CLOCK;
-            ch2.phase += ch2.frequency / GB_CLOCK;
-            
-            // Keep phase in range [0, 1)
-            if (ch1.phase >= 1.0f) ch1.phase -= 1.0f;
-            if (ch2.phase >= 1.0f) ch2.phase -= 1.0f;
-                }
-
-        }
+        
+        // Phase advances based on frequency and time
+        float time_delta = cycles / GB_CLOCK;
+        
+        ch1.phase += ch1.frequency * time_delta;
+        ch2.phase += ch2.frequency * time_delta;
+        
+        // ✅ Use fmod to properly wrap phase
+        ch1.phase = fmod(ch1.phase, 1.0f);
+        ch2.phase = fmod(ch2.phase, 1.0f);
+    }
     
     float generateSample() {
         float sample = 0.0f;
@@ -482,7 +538,8 @@ private:
             case 2: duty_cycle = 0.5f; break;
             case 3: duty_cycle = 0.75f; break;
         }
-        return (fmod(phase, 1.0f) < duty_cycle) ? 1.0f : -1.0f;
+        // ✅ Phase is already wrapped, no need for fmod
+        return (phase < duty_cycle) ? 1.0f : -1.0f;
     }
     
     
@@ -4406,83 +4463,105 @@ public:
     }
 
 void renderScanline() {
-    // Read LCD control register
     uint8_t lcdc = memory->read(0xFF40);
     
-    // Check if LCD is completely off (bit 7)
-    if (!(lcdc & 0x80)) {
-        // LCD is OFF - don't render anything, keep showing last frame
-        return;
-    }
+    if (!(lcdc & 0x80)) return;  // LCD off
     
-    // Check if background is enabled (bit 0)
-    if (!(lcdc & 0x01)) {
-        // Background disabled - fill scanline with white
+    uint8_t wy = memory->read(0xFF4A);  // Window Y
+    uint8_t wx = memory->read(0xFF4B);  // Window X
+    bool window_enabled = (lcdc & 0x20) && (scanline >= wy);
+    
+    // Background rendering (existing code)
+    if (lcdc & 0x01) {
+        uint8_t scy = memory->read(0xFF42);
+        uint8_t scx = memory->read(0xFF43);
+        uint16_t tile_map_base = (lcdc & 0x08) ? 0x9C00 : 0x9800;
+        bool use_signed = !(lcdc & 0x10);
+        uint16_t tile_data_base = use_signed ? 0x9000 : 0x8000;
+        
+        uint8_t bg_y = (scanline + scy) & 0xFF;
+        uint8_t tile_row = bg_y / 8;
+        uint8_t pixel_row = bg_y % 8;
+        
         for (int x = 0; x < SCREEN_WIDTH; x++) {
-            int fb_index = scanline * SCREEN_WIDTH + x;
-            framebuffer[fb_index] = 0xFFFFFFFF;
+            if (window_enabled && x >= (wx - 7)) {
+                // Draw window pixel instead
+                uint16_t win_tile_map = (lcdc & 0x40) ? 0x9C00 : 0x9800;
+                int win_y = scanline - wy;
+                int win_x = x - (wx - 7);
+                
+                uint8_t win_tile_row = win_y / 8;
+                uint8_t win_pixel_row = win_y % 8;
+                uint8_t win_tile_col = win_x / 8;
+                uint8_t win_pixel_col = win_x % 8;
+                
+                uint16_t tile_map_addr = win_tile_map + (win_tile_row * 32) + win_tile_col;
+                uint8_t tile_num = memory->read(tile_map_addr);
+                
+                uint16_t tile_addr;
+                if (use_signed) {
+                    int8_t signed_tile = (int8_t)tile_num;
+                    tile_addr = tile_data_base + ((signed_tile + 128) * 16);
+                } else {
+                    tile_addr = tile_data_base + (tile_num * 16);
+                }
+                
+                uint8_t byte1 = memory->read(tile_addr + (win_pixel_row * 2));
+                uint8_t byte2 = memory->read(tile_addr + (win_pixel_row * 2) + 1);
+                
+                int bit = 7 - win_pixel_col;
+                uint8_t color_num = ((byte2 >> bit) & 1) << 1 | ((byte1 >> bit) & 1);
+                
+                uint32_t color;
+                switch (color_num) {
+                    case 0: color = 0xFFFFFFFF; break;
+                    case 1: color = 0xFFAAAAAA; break;
+                    case 2: color = 0xFF555555; break;
+                    case 3: color = 0xFF000000; break;
+                }
+                
+                framebuffer[scanline * SCREEN_WIDTH + x] = color;
+            } else {
+                // Draw background pixel (your existing code)
+                uint8_t bg_x = (x + scx) & 0xFF;
+                uint8_t tile_col = bg_x / 8;
+                uint8_t pixel_col = bg_x % 8;
+                
+                uint16_t tile_map_addr = tile_map_base + (tile_row * 32) + tile_col;
+                uint8_t tile_num = memory->read(tile_map_addr);
+                
+                uint16_t tile_addr;
+                if (use_signed) {
+                    int8_t signed_tile = (int8_t)tile_num;
+                    tile_addr = tile_data_base + ((signed_tile + 128) * 16);
+                } else {
+                    tile_addr = tile_data_base + (tile_num * 16);
+                }
+                
+                uint8_t byte1 = memory->read(tile_addr + (pixel_row * 2));
+                uint8_t byte2 = memory->read(tile_addr + (pixel_row * 2) + 1);
+                
+                int bit = 7 - pixel_col;
+                uint8_t color_num = ((byte2 >> bit) & 1) << 1 | ((byte1 >> bit) & 1);
+                
+                // Instead of hardcoded colors, read BGP register
+                uint8_t bgp = memory->read(0xFF47);  // Background palette
+                uint8_t palette_color = (bgp >> (color_num * 2)) & 0x03;
+
+                uint32_t color;
+                switch (palette_color) {
+                    case 0: color = 0xFFFFFFFF; break;
+                    case 1: color = 0xFFAAAAAA; break;
+                    case 2: color = 0xFF555555; break;
+                    case 3: color = 0xFF000000; break;
+                }
+                
+                framebuffer[scanline * SCREEN_WIDTH + x] = color;
+            }
         }
-        return;
     }
     
-    // Read scroll registers
-    uint8_t scy = memory->read(0xFF42);  // Scroll Y
-    uint8_t scx = memory->read(0xFF43);  // Scroll X
-    
-    // Which tile map to use? (bit 3 of LCDC)
-    uint16_t tile_map_base = (lcdc & 0x08) ? 0x9C00 : 0x9800;
-    
-    // Which tile data to use? (bit 4 of LCDC)
-    bool use_signed = !(lcdc & 0x10);
-    uint16_t tile_data_base = use_signed ? 0x9000 : 0x8000;
-    
-    // Calculate which row of the background we're drawing
-    uint8_t bg_y = (scanline + scy) & 0xFF;  // Wrap around
-    uint8_t tile_row = bg_y / 8;   // Which row of tiles
-    uint8_t pixel_row = bg_y % 8;  // Which row within the tile
-    
-    // Draw each pixel in this scanline
-    for (int x = 0; x < SCREEN_WIDTH; x++) {
-        // Calculate background position
-        uint8_t bg_x = (x + scx) & 0xFF;  // Wrap around
-        uint8_t tile_col = bg_x / 8;
-        uint8_t pixel_col = bg_x % 8;
-        
-        // Get tile number from tile map
-        uint16_t tile_map_addr = tile_map_base + (tile_row * 32) + tile_col;
-        uint8_t tile_num = memory->read(tile_map_addr);
-        
-        // Calculate tile data address
-        uint16_t tile_addr;
-        if (use_signed) {
-            int8_t signed_tile = (int8_t)tile_num;
-            tile_addr = tile_data_base + ((signed_tile + 128) * 16);
-        } else {
-            tile_addr = tile_data_base + (tile_num * 16);
-        }
-        
-        // Read the two bytes for this pixel row
-        uint8_t byte1 = memory->read(tile_addr + (pixel_row * 2));
-        uint8_t byte2 = memory->read(tile_addr + (pixel_row * 2) + 1);
-        
-        // Extract the pixel color
-        int bit = 7 - pixel_col;
-        uint8_t color_num = ((byte2 >> bit) & 1) << 1 | ((byte1 >> bit) & 1);
-        
-        // Convert to RGB
-        uint32_t color;
-        switch (color_num) {
-            case 0: color = 0xFFFFFFFF; break;
-            case 1: color = 0xFFAAAAAA; break;
-            case 2: color = 0xFF555555; break;
-            case 3: color = 0xFF000000; break;
-        }
-        
-        // Draw to framebuffer
-        int fb_index = scanline * SCREEN_WIDTH + x;
-        framebuffer[fb_index] = color;
-    }
-    renderSprites();
+    renderSprites();  
 }
 
 void renderSprites() {
@@ -4496,7 +4575,6 @@ void renderSprites() {
     // Sprite height: 8x8 or 8x16 (bit 2)
     int sprite_height = (lcdc & 0x04) ? 16 : 8;
     
-    // ✅ NEW DEBUG: Print first few sprites in OAM once
     static bool printed_oam = false;
     if (!printed_oam) {
         std::cout << "\n=== OAM CONTENTS ===" << std::endl;
@@ -4754,6 +4832,9 @@ int main(int argc, char* argv[]) {
         std::cout << "SDL could not initialize! SDL_Error: " << SDL_GetError() << std::endl;
         return 1;
     }
+    const float TARGET_FPS = 59.7f;
+    const float FRAME_TIME = 1000.0f / TARGET_FPS;  // ~16.75ms
+    Uint32 frame_start_time = SDL_GetTicks();
     
     GameBoy gameboy;
     Display display;
@@ -4821,16 +4902,20 @@ int main(int argc, char* argv[]) {
         
         // ✅ Remove the updateButtonStates() call - we handle it manually now
         
-        int cycles_this_frame = 0;
-        while (cycles_this_frame < 70224) {
-            cycles_this_frame += gameboy.step();
-            static int audio_cycles = 0;
-            audio_cycles += gameboy.step();
-            if (audio_cycles >= 95) {
-                audio_cycles -= 95;
-                audio_buffer.push_back(gameboy.getAudioSample());
-            }
+    int cycles_this_frame = 0;
+    static int audio_cycles = 0;  // ✅ Move outside the loop
+
+    while (cycles_this_frame < 70224) {
+        int cycles = gameboy.step();  // ✅ Call once
+        cycles_this_frame += cycles;
+        audio_cycles += cycles;
+    
+    // Generate audio sample every ~95 cycles (44100 Hz from 4.194 MHz)
+        while (audio_cycles >= 95) {
+            audio_cycles -= 95;
+            audio_buffer.push_back(gameboy.getAudioSample());
         }
+}
 
         if (!audio_buffer.empty()) {
             SDL_QueueAudio(audio_device, audio_buffer.data(), audio_buffer.size() * sizeof(float));
@@ -4838,7 +4923,14 @@ int main(int argc, char* argv[]) {
         }
 
         display.render(gameboy.getScreen());
-        SDL_Delay(16); // Roughly 60 FPS
+        display.render(gameboy.getScreen());
+
+        Uint32 frame_end_time = SDL_GetTicks();
+        float frame_duration = frame_end_time - frame_start_time;
+        if (frame_duration < FRAME_TIME) {
+            SDL_Delay(FRAME_TIME - frame_duration);
+        }
+        frame_start_time = SDL_GetTicks();
     }
     SDL_CloseAudioDevice(audio_device);
     SDL_Quit();
